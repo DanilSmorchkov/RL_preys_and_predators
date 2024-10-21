@@ -22,7 +22,7 @@ class TwoTeamMapLoader(StochasticMapLoader):
         mask = np.tri(self.size)
         other_part = (1 - mask) * map.T
         other_part[other_part == 1] = 2
-        map = (mask * map + other_part).astype(np.int)
+        map = (mask * map + other_part).astype(np.int32)
         return map
 
     @abc.abstractmethod
