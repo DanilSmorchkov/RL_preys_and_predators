@@ -42,8 +42,8 @@ class GridWorld:
                         self.teams[self.map[ty, tx][0]][self.map[ty, tx][1]].alive = False
 
                 eaten[tuple(self.map[ty, tx])] = i
-                self.map[y, x] = np.array((-1, 0), dtype=np.long)
-                self.map[ty, tx] = np.array(i, dtype=np.long)
+                self.map[y, x] = np.array((-1, 0), dtype=np.float64)
+                self.map[ty, tx] = np.array(i, dtype=np.float64)
                 ent.x, ent.y = tx, ty
             else:
                 if self.map[ty, tx][0] == -1:
@@ -51,8 +51,8 @@ class GridWorld:
                         ent.bonus_count += 1
                         self.map[ty, tx][1] = 0
                     if self.map[ty, tx][1] == 0:
-                        self.map[y, x] = np.array((-1, 0), dtype=np.long)
-                        self.map[ty, tx] = np.array(i, dtype=np.long)
+                        self.map[y, x] = np.array((-1, 0), dtype=np.float64)
+                        self.map[ty, tx] = np.array(i, dtype=np.float64)
                         ent.x, ent.y = tx, ty
 
         # Preys move
@@ -63,8 +63,8 @@ class GridWorld:
             x, y, tx, ty = self._action_coord_change(prey, action)
             if self.map[ty, tx][0] == -1:
                 if self.map[ty, tx][1] == 0:
-                    self.map[y, x] = np.array((-1, 0), dtype=np.long)
-                    self.map[ty, tx] = np.array((self.playable_teams_num, prey.idx), dtype=np.long)
+                    self.map[y, x] = np.array((-1, 0), dtype=np.float64)
+                    self.map[ty, tx] = np.array((self.playable_teams_num, prey.idx), dtype=np.float64)
                     prey.x, prey.y = tx, ty
 
         # Respawn predators
