@@ -37,15 +37,9 @@ class ImagePreprocessor(nn.Module):
         self.conv1 = nn.Sequential(
             ConvBlock(in_channels=2, out_channels=64, stride=1),
             ResConvBlock(in_channels=64),
-            ResConvBlock(in_channels=64),
-            ResConvBlock(in_channels=64),
             ConvBlock(in_channels=64, out_channels=64, stride=2),
             ResConvBlock(in_channels=64),
-            ResConvBlock(in_channels=64),
-            ResConvBlock(in_channels=64),
             ConvBlock(in_channels=64, out_channels=64, stride=2),
-            ResConvBlock(in_channels=64),
-            ResConvBlock(in_channels=64),
             ResConvBlock(in_channels=64),
             nn.Flatten(),
         )

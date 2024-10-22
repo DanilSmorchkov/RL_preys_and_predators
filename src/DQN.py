@@ -16,6 +16,10 @@ from options import (
     STEPS_PER_TARGET_UPDATE,
 )
 
+from world.utils import RenderedEnvWrapper
+
+random.seed(1337)
+
 
 class DQNModel(nn.Module):
     def __init__(self, n_observations, n_actions):
@@ -166,8 +170,9 @@ def calculate_reward(new_info) -> int:
 
 
 def evaluate_policy(agent, env, episodes=5):
+    env = RenderedEnvWrapper(env)
     returns = []
-    for _ in range(episodes):
+    for i in range(episodes):
         done = False
         state, info = env.reset()
         total_reward = np.zeros(5)
@@ -178,5 +183,6 @@ def evaluate_policy(agent, env, episodes=5):
             reward = calculate_reward(info)
 
             total_reward += reward
+        env.render(f"../Episode_{i+1}")
         returns.append(total_reward.sum())
     return returns

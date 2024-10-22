@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-from random import random
 
 from DQN import DQN, evaluate_policy
 from DQN import calculate_reward
@@ -10,6 +9,9 @@ from options import INITIAL_STEPS, TRANSITIONS
 from world.envs import OnePlayerEnv
 from world.map_loaders.single_team import SingleTeamLabyrinthMapLoader
 from world.realm import Realm
+
+np.random.seed(1337)
+torch.manual_seed(1337)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 env = OnePlayerEnv(Realm(SingleTeamLabyrinthMapLoader(), 1))
@@ -44,7 +46,7 @@ state, info = env.reset()
 
 for i in range(TRANSITIONS):
     # Epsilon-greedy policy
-    if random() < eps:
+    if np.random.rand() < eps:
         action = np.random.randint(0, 5, size=(5,))
     else:
         action = dqn.act(state, info)

@@ -10,7 +10,7 @@ class GridWorld:
         self.playable_teams_num = playable_teams_num
         self.team_spawn_coordinates = [[] for _ in range(self.playable_teams_num)]
         self.teams = [dict([(j, Entity(0, 0, j, i, False)) for j in range(self.playable_team_size)]) for i in range(self.playable_teams_num)]
-        self.random = random.Random()
+        self.random = random.Random(1337)
         self.eaten_preys = set()
         self.preys = []
         self.actions = {}
