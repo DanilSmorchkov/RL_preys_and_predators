@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 
-from src.preprocess import RLPreprocessor
+from src.preprocess import RLPreprocessor, ImagePreprocessor
 
 
 class A3C(nn.Module):
@@ -30,9 +30,9 @@ class A3C(nn.Module):
             nn.init.normal_(layer.weight, mean=0.0, std=0.1)
             nn.init.constant_(layer.bias, 0.0)
 
-    def forward(self, img, additional_info):
+    def forward(self, img):
         # Get state repr
-        x = self.processor(img, additional_info)
+        x = self.processor(img)
 
         # Actor inference
         pi1 = torch.tanh(self.pi1(x))
@@ -44,22 +44,22 @@ class A3C(nn.Module):
 
         return logits, values.squeeze(-1)
 
-    def act(self, img, additional_info):
+    def act(self, img):
         self.eval()
-        logits, _ = self.forward(img, additional_info)
-        prob = F.softmax(logits, dim=1).data
+        with torch.no_grad():
+            logits, _ = self.forward(img)
+        prob = F.softmax(logits, dim=-1).data
         m = self.distribution(prob)
         return m.sample()[0].cpu().numpy()
 
     def loss_func(
         self,
         states,
-        info,
         actions,
         discounted_rewards,
     ):
         self.train()
-        logits, critic_value_function_prediction = self.forward(states, info)
+        logits, critic_value_function_prediction = self.forward(states)
         advantage_function = discounted_rewards - critic_value_function_prediction
         critic_loss = advantage_function.pow(2)
 
@@ -68,7 +68,8 @@ class A3C(nn.Module):
 
         current_distribution = self.distribution(probs)
         log_prob = current_distribution.log_prob(actions)
-        a_loss = -log_prob * advantage_function.detach().squeeze()
+        a_loss = -log_prob * advantage_function.detach()
 
-        total_loss = (a_loss - 0.01 * entropies + critic_loss).mean()
+        total_loss = (a_loss - 0.1 * entropies + critic_loss).sum()
+        # print(total_loss)
         return total_loss

@@ -39,44 +39,40 @@ class Worker(mp.Process):
         total_step = 1
         while self.global_episode.value < TRANSITIONS:
             state, info = self.local_env.reset()
-            states_buffer, info_buffer, actions_buffer, rewards_buffer = [], [], [], []
+            states_buffer, actions_buffer, rewards_buffer = [], [], []
             while True:
-                # if self.name == "w00":
-                #     self.env.render()
-                state, additional_info = preprocess_data(state, info)
-                action = self.local_network.act(state.to(self.device), additional_info.to(self.device))
+                state = preprocess_data(state, info)
+                action = self.local_network.act(state.to(self.device))
                 next_state, done, next_info = self.local_env.step(action)
 
                 reward = calculate_reward(next_state, info, next_info)
 
                 states_buffer.append(state)
-                info_buffer.append(additional_info)
+                # info_buffer.append(additional_info)
                 actions_buffer.append(torch.tensor(action).unsqueeze(0))
                 rewards_buffer.append(reward)
 
                 if total_step % STEPS_PER_UPDATE == 0 or done:  # update global and assign to local net
                     # sync
                     self.push_and_pull(
-                        done,
                         next_state,
                         next_info,
                         states_buffer,
-                        info_buffer,
                         actions_buffer,
                         rewards_buffer,
                     )
-                    states_buffer, info_buffer, actions_buffer, rewards_buffer = [], [], [], []
+                    
 
                     if done:  # done and print information
                         record(
                             self.global_episode,
                             self.global_episode_reward,
-                            next_info["scores"][0],
+                            sum(rewards_buffer).sum(),
                             self.res_queue,
                             self.name,
                         )
                         break
-
+                    states_buffer, actions_buffer, rewards_buffer = [], [], []
                 state = next_state.copy()
                 info = next_info.copy()
                 total_step += 1
@@ -85,39 +81,27 @@ class Worker(mp.Process):
 
     def push_and_pull(
         self,
-        done,
         next_state,
         next_info,
         states_buffer,
-        info_buffer,
         actions_buffer,
         rewards_buffer,
     ):
-        if done:
-            R = np.zeros((1, 5))  # terminal
-        else:
-            next_state = torch.tensor(next_state).unsqueeze(0).permute(0, 3, 1, 2).float().to(self.device)
-            next_info = (
-                torch.tensor(np.array([(agent["x"], agent["y"]) for agent in next_info["predators"]]))
-                .unsqueeze(0)
-                .float()
-                .to(self.device)
-            )
-            with torch.no_grad():
-                R = self.local_network.forward(next_state, next_info)[-1].cpu().numpy()
+        next_state = preprocess_data(next_state, next_info).to(self.device)
+            
+        with torch.no_grad():
+            R = self.local_network.forward(next_state)[-1].cpu().numpy()
 
         discounted_rewards = []
         for reward in rewards_buffer[::-1]:  # reverse buffer r
             R = reward + GAMMA * R
             discounted_rewards.append(torch.tensor(R))
         discounted_rewards.reverse()
-        discounted_rewards = torch.cat(discounted_rewards)
         # todo: tensors
         loss = self.local_network.loss_func(
             torch.cat(states_buffer).to(self.device),
-            torch.cat(info_buffer).to(self.device),
             torch.cat(actions_buffer).to(self.device),
-            discounted_rewards.to(self.device),
+            torch.cat(discounted_rewards).to(self.device),
         )
 
         # calculate local gradients and push local parameters to global

@@ -8,7 +8,7 @@ import seaborn as sns
 
 
 from src.A3C import A3C
-from src.utils import SharedAdam, evaluate_policy, SharedRMSprop
+from src.utils import SharedAdam, evaluate_policy
 from src.parallel import Worker
 
 from world.envs import OnePlayerEnv

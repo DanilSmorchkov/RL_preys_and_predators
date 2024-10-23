@@ -27,70 +27,16 @@ class SharedAdam(torch.optim.Adam):
                 state['exp_avg'].share_memory_()
                 state['exp_avg_sq'].share_memory_()
 
-class SharedRMSprop(torch.optim.RMSprop):
-    """Implements RMSprop algorithm with shared states.
-    """
-
-    def __init__(self, params, lr=1e-2, alpha=0.99, eps=1e-8, weight_decay=0):
-        super(SharedRMSprop, self).__init__(params, lr=lr, alpha=alpha, eps=eps, weight_decay=weight_decay, momentum=0, centered=False)
-
-        # State initialisation (must be done before step, else will not be shared between threads)
-        for group in self.param_groups:
-            for p in group['params']:
-                state = self.state[p]
-                state['step'] = p.data.new().resize_(1).zero_()
-                state['square_avg'] = p.data.new().resize_as_(p.data).zero_()
-
-    def share_memory(self):
-        for group in self.param_groups:
-            for p in group['params']:
-                state = self.state[p]
-                state['step'].share_memory_()
-                state['square_avg'].share_memory_()
-
-    def step(self, closure=None):
-        """Performs a single optimization step.
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
-        """
-        loss = None
-        if closure is not None:
-            loss = closure()
-
-        for group in self.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                grad = p.grad.data
-                state = self.state[p]
-
-                square_avg = state['square_avg']
-                alpha = group['alpha']
-
-                state['step'] += 1
-
-                if group['weight_decay'] != 0:
-                    grad = grad.add(group['weight_decay'], p.data)
-
-                # g = αg + (1 - α)Δθ^2
-                square_avg.mul_(alpha).addcmul_(1 - alpha, grad, grad)
-                # θ ← θ - ηΔθ/√(g + ε)
-                avg = square_avg.sqrt().add_(group['eps'])
-                p.data.addcdiv_(-group['lr'], grad, avg)
-
-        return loss
-
 def calculate_reward(state, old_info, new_info) -> np.ndarray:
     # eaten словарь из пойманных существ.
     # Ключи - номер команды и индекс пойманного существа,
     # значение - номер команды и индекс существа, которое его поймало
     team_indices = [predator["id"] for predator in new_info["predators"]]
-    team_coordinates = np.array([(predator["x"], predator["y"]) for predator in new_info["predators"]])
-    old_team_coordinates = np.array([(predator["x"], predator["y"]) for predator in old_info["predators"]])
+    team_coordinates = np.array([(predator["y"], predator["x"]) for predator in new_info["predators"]])
+    old_team_coordinates = np.array([(predator["y"], predator["x"]) for predator in old_info["predators"]])
 
-    new_preys_coordinates = np.array([(prey["x"], prey["y"]) for prey_index, prey in enumerate(new_info["preys"]) if old_info["preys"][prey_index]["alive"]])
-    old_preys_coordinates = np.array([(prey["x"], prey["y"]) for prey in old_info["preys"] if prey["alive"]])
+    new_preys_coordinates = np.array([(prey["y"], prey["x"]) for prey_index, prey in enumerate(new_info["preys"]) if old_info["preys"][prey_index]["alive"]])
+    old_preys_coordinates = np.array([(prey["y"], prey["x"]) for prey in old_info["preys"] if prey["alive"]])
 
     rewards = []
 
@@ -107,17 +53,17 @@ def calculate_reward(state, old_info, new_info) -> np.ndarray:
         #     + 5 / (distance_to_closest_prey + 1e-9)
         #     + 3 * (my_hash[tuple(hunter_position)]) ** (-1 / 2)
         # )
-        current_potential = get_potential(state, hunter_position, old_preys_coordinates)
+        current_potential = get_potential(state, hunter_position, new_preys_coordinates)
         previous_potential = get_potential(state, old_hunter_position, old_preys_coordinates)
 
         rewards.append(0.9 * current_potential - previous_potential)
     return np.array(rewards)
 
 def get_potential(state, hunter_position: np.ndarray, preys_coordinates: np.ndarray):
-    closest_pray_coords = preys_coordinates[np.argmin(np.sum(np.abs(preys_coordinates - hunter_position), axis=-1))]
+    closest_pray_coords = preys_coordinates[np.argsort(np.sum(np.abs(preys_coordinates - hunter_position), axis=-1))]
 
-    distance = find_path(state, hunter_position, closest_pray_coords)
-    return 1 - distance /(40+40)
+    distance = find_path(state, hunter_position, closest_pray_coords, 5)
+    return 1 - distance /(40 + 40 - 2)
 
 def record(global_ep, global_ep_r, episode_score, res_queue, name):
     with global_ep.get_lock():
@@ -129,7 +75,7 @@ def record(global_ep, global_ep_r, episode_score, res_queue, name):
         name,
         "Ep:",
         global_ep.value,
-        "| Ep_r: %.0f" % global_ep_r.value,
+        "| Ep_r: %.3f" % global_ep_r.value,
         # "| Ep_score: %.0f" % episode_score,
     )
 
@@ -142,8 +88,8 @@ def evaluate_policy(agent, env, device, episodes=5):
         state, info = env.reset()
 
         while not done:
-            state, additional_info = preprocess_data(state, info)
-            state, done, new_info = env.step(agent.act(state.to(device), additional_info.to(device)))
+            state = preprocess_data(state, info)
+            state, done, new_info = env.step(agent.act(state.to(device)))
 
             # reward = calculate_reward(info, new_info)
 
@@ -153,18 +99,23 @@ def evaluate_policy(agent, env, device, episodes=5):
         env.render(f"./Episode_{i+1}")
     return info["scores"][0]
 
-def preprocess_data(state: np.ndarray, info: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    state = torch.tensor(state).unsqueeze(0).permute(0, 3, 1, 2).float()
+def preprocess_data(state: np.ndarray, info: dict) -> torch.Tensor:
+    state = torch.tensor(state)
 
-    hunters_coordinates = torch.tensor(np.array([(agent["x"], agent["y"]) for agent in info["predators"]]))
-    preys_coordinates = torch.tensor(np.array([(prey["x"], prey["y"]) for prey in info["preys"] if prey["alive"]]))
-    result_directions = []
-    # todo: ПОДНЯТЬСЯ
+    hunters_coordinates = torch.tensor(np.array([(agent["y"], agent["x"]) for agent in info["predators"]]))
+    prey_id = state[:,:, 0].max()
+    prey_mask = (state[:,:, 0] == prey_id)
+    hunter_mask = (state[:,:, 0] == 0)
+    state[prey_mask] = prey_id * torch.ones_like(state[prey_mask])
+
+    states = []
     for hunter_coordinates in hunters_coordinates:
-        vectors = hunter_coordinates[None, :] - preys_coordinates
-        closest_prey_index = torch.linalg.norm(vectors.float(), dim=1).argmin()
-        result_directions.append(vectors[closest_prey_index].unsqueeze(0) / torch.linalg.norm(vectors[closest_prey_index].float()))
-    return state, torch.cat(result_directions).unsqueeze(0)
+        new_state = state.clone()
+        new_state[hunter_mask] = 5 * torch.ones_like(new_state[hunter_mask])
+        new_state[[*hunter_coordinates]] = torch.ones_like(new_state[[*hunter_coordinates]]) * 15
+        states.append(new_state.permute(2,0,1).float().unsqueeze(0))
+    
+    return torch.cat(states)
 
 from collections import deque
 
@@ -249,10 +200,21 @@ def BFS(mat, src: Point, dest: Point):
     # Return -1 if destination cannot be reached 
     return -1
 
-def find_path(state, hunter_coods, nearest_prey_coords):
+def find_path(state, hunter_coods, preys_coords, top_nearest = 5):
+    preys_coords = preys_coords[:top_nearest]
     state = state.squeeze()
-    mask = ((state[:, :, 0] != -1) + (state[:, :, 1] != -1)).astype(np.int32)
-    source = Point(*hunter_coods)
-    dest = Point(*nearest_prey_coords)
 
-    return BFS(mask,source,dest)
+    mask = (~((state[:, :, 0] == -1) * (state[:, :, 1] == -1) 
+              + (state[:, :, 0] == 0))).astype(np.int32)
+    mask[hunter_coods[0], hunter_coods[1]] = 1
+    source = Point(*hunter_coods)
+    distance = np.inf
+    for nearest_prey_coords in preys_coords:
+        dest = Point(*nearest_prey_coords)
+        distance = min(distance, BFS(mask,source,dest))
+        if distance == 0:
+            break
+        if distance == -1:
+            distance = 40 + 40 - 2
+            break
+    return distance
