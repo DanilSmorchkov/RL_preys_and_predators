@@ -6,9 +6,9 @@ from world.realm import Realm
 from src.A3C import A3C
 from world.map_loaders.single_team import SingleTeamLabyrinthMapLoader
 from src.options import TRANSITIONS
-from utils import calculate_reward
+from src.utils import calculate_reward
 from src.options import GAMMA, STEPS_PER_UPDATE
-from src.utils import record
+from src.utils import record, preprocess_data
 import numpy as np
 
 
@@ -43,16 +43,11 @@ class Worker(mp.Process):
             while True:
                 # if self.name == "w00":
                 #     self.env.render()
-                state = torch.tensor(state).unsqueeze(0).permute(0, 3, 1, 2).float()
-                additional_info = (
-                    torch.tensor(np.array([(agent["x"], agent["y"]) for agent in info["predators"]]))
-                    .unsqueeze(0)
-                    .float()
-                )
+                state, additional_info = preprocess_data(state, info)
                 action = self.local_network.act(state.to(self.device), additional_info.to(self.device))
                 next_state, done, next_info = self.local_env.step(action)
 
-                reward = calculate_reward(info, next_info)
+                reward = calculate_reward(next_state, info, next_info)
 
                 states_buffer.append(state)
                 info_buffer.append(additional_info)
@@ -82,11 +77,9 @@ class Worker(mp.Process):
                         )
                         break
 
-                if done:
-                    break
-                else:
-                    state = next_state.copy()
-                    info = next_info.copy()
+                state = next_state.copy()
+                info = next_info.copy()
+                total_step += 1
 
         self.res_queue.put(None)
 
@@ -101,7 +94,7 @@ class Worker(mp.Process):
         rewards_buffer,
     ):
         if done:
-            R = 0.0  # terminal
+            R = np.zeros((1, 5))  # terminal
         else:
             next_state = torch.tensor(next_state).unsqueeze(0).permute(0, 3, 1, 2).float().to(self.device)
             next_info = (
@@ -110,12 +103,13 @@ class Worker(mp.Process):
                 .float()
                 .to(self.device)
             )
-            R = self.local_network.forward(next_state, next_info)[-1].numpy()
+            with torch.no_grad():
+                R = self.local_network.forward(next_state, next_info)[-1].cpu().numpy()
 
         discounted_rewards = []
         for reward in rewards_buffer[::-1]:  # reverse buffer r
             R = reward + GAMMA * R
-            discounted_rewards.append(torch.tensor(R).unsqueeze(0))
+            discounted_rewards.append(torch.tensor(R))
         discounted_rewards.reverse()
         discounted_rewards = torch.cat(discounted_rewards)
         # todo: tensors

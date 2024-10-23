@@ -64,9 +64,11 @@ class A3C(nn.Module):
         critic_loss = advantage_function.pow(2)
 
         probs = F.softmax(logits, dim=-1)
+        entropies = -(F.log_softmax(logits, dim=-1) * probs).sum(-1)
+
         current_distribution = self.distribution(probs)
         log_prob = current_distribution.log_prob(actions)
         a_loss = -log_prob * advantage_function.detach().squeeze()
 
-        total_loss = (a_loss + critic_loss).mean()
+        total_loss = (a_loss - 0.01 * entropies + critic_loss).mean()
         return total_loss

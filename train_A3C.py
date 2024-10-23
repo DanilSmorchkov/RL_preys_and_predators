@@ -1,11 +1,14 @@
 import torch
 import multiprocessing as mp
+
+mp.set_start_method('spawn', force=True)
+
 import numpy as np
 import seaborn as sns
 
 
 from src.A3C import A3C
-from src.utils import SharedAdam, evaluate_policy
+from src.utils import SharedAdam, evaluate_policy, SharedRMSprop
 from src.parallel import Worker
 
 from world.envs import OnePlayerEnv
@@ -17,14 +20,14 @@ import os
 os.environ["OMP_NUM_THREADS"] = "1"
 
 if __name__ == "__main__":
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     gnet = A3C().to(device)  # global network
     gnet.share_memory()  # share the global parameters in multiprocessing
     opt = SharedAdam(gnet.parameters(), lr=1e-4)  # global optimizer
     global_episode_counter, global_episode_rewards, results_queue = mp.Value("i", 0), mp.Value("d", 0.0), mp.Queue()
     # parallel training
     workers = [
-        Worker(gnet, opt, global_episode_counter, global_episode_rewards, results_queue, i, device) for i in range(4)
+        Worker(gnet, opt, global_episode_counter, global_episode_rewards, results_queue, i, device) for i in range(10)
     ]
     [w.start() for w in workers]
     res = []  # record episode reward to plot
@@ -39,3 +42,4 @@ if __name__ == "__main__":
     plot = sns.lineplot(x=np.arange(len(res)), y=res)
     plot.get_figure().savefig('training.jpg')
     evaluate_policy(agent=gnet, env=OnePlayerEnv(Realm(SingleTeamLabyrinthMapLoader(), 1)), device=device, episodes=1)
+    torch.save(gnet.state_dict(), 'final.pth')
