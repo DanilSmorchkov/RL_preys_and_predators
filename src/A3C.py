@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import os
+import numpy as np
 
 from src.preprocess import RLPreprocessor, ImagePreprocessor
 
+import random
 
 class A3C(nn.Module):
     def __init__(self):
@@ -46,11 +47,14 @@ class A3C(nn.Module):
 
     def act(self, img):
         self.eval()
+        # if random.random() > 0.1:
         with torch.no_grad():
             logits, _ = self.forward(img)
         prob = F.softmax(logits, dim=-1).data
         m = self.distribution(prob)
         return m.sample()[0].cpu().numpy()
+        # else:
+        #     return np.random.randint(0, 5, size = (5,))
 
     def loss_func(
         self,
@@ -70,6 +74,6 @@ class A3C(nn.Module):
         log_prob = current_distribution.log_prob(actions)
         a_loss = -log_prob * advantage_function.detach()
 
-        total_loss = (a_loss - 0.1 * entropies + critic_loss).sum()
-        # print(total_loss)
+        total_loss = (a_loss - 0.5 * entropies + critic_loss).sum()
+        print(total_loss.detach().sum() + 0.5 * entropies.detach().sum())
         return total_loss

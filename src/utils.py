@@ -38,6 +38,7 @@ def calculate_reward(state, old_info, new_info) -> np.ndarray:
     new_preys_coordinates = np.array([(prey["y"], prey["x"]) for prey_index, prey in enumerate(new_info["preys"]) if old_info["preys"][prey_index]["alive"]])
     old_preys_coordinates = np.array([(prey["y"], prey["x"]) for prey in old_info["preys"] if prey["alive"]])
 
+    # eaten = np.array(list(new_info["eaten"].values()))
     rewards = []
 
     for hunter_index, hunter_position, old_hunter_position in zip(team_indices, team_coordinates, old_team_coordinates):
@@ -56,7 +57,7 @@ def calculate_reward(state, old_info, new_info) -> np.ndarray:
         current_potential = get_potential(state, hunter_position, new_preys_coordinates)
         previous_potential = get_potential(state, old_hunter_position, old_preys_coordinates)
 
-        rewards.append(0.9 * current_potential - previous_potential)
+        rewards.append(0.99 * current_potential - previous_potential)
     return np.array(rewards)
 
 def get_potential(state, hunter_position: np.ndarray, preys_coordinates: np.ndarray):

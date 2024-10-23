@@ -67,7 +67,7 @@ class Worker(mp.Process):
                         record(
                             self.global_episode,
                             self.global_episode_reward,
-                            sum(rewards_buffer).sum(),
+                            next_info["scores"][0],
                             self.res_queue,
                             self.name,
                         )
