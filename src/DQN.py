@@ -13,7 +13,6 @@ from src.options import (
     LEARNING_RATE,
     GAMMA,
     STEPS_PER_UPDATE,
-    STEPS_PER_TARGET_UPDATE,
 )
 
 from world.utils import RenderedEnvWrapper
@@ -59,8 +58,9 @@ class DQN:
         self.policy_model = DQNModel(state_dim, action_dim).to(self.device)
         self.target_model.load_state_dict(self.policy_model.state_dict())
         self.replay_buffer = ReplayMemory(INITIAL_STEPS)
-        self.criterion = nn.MSELoss()
+        self.criterion = nn.HuberLoss()
         self.optimizer = Adam(self.policy_model.parameters(), lr=LEARNING_RATE)
+        self.tau = 0.005
 
     def consume_transition(self, transition):
         # Add transition to a replay buffer.
@@ -79,17 +79,17 @@ class DQN:
     def train_step(self, batch):
         self.policy_model.train()
         # Use batch to update DQN's network.
-        state_batch = torch.cat(batch.state).to(torch.float)
+        state_batch = torch.tensor(np.concatenate(batch.state)).to(torch.float)
         action_batch = torch.tensor(np.array(batch.action), dtype=torch.int64).to(self.device)
 
         state_action_values = (
             self.policy_model(state_batch.to(self.device))
-            .gather(2, action_batch[:, None])
+            .gather(dim=2, index=action_batch[..., None])
             .squeeze()
             .to(self.device)
         )
 
-        next_state_batch =  torch.cat(batch.next_state)
+        next_state_batch = torch.tensor(np.concatenate(batch.next_state))
         reward_batch = torch.tensor(np.array(batch.reward)).to(self.device)
         done_batch = torch.tensor(np.array(batch.done))
 
@@ -105,20 +105,24 @@ class DQN:
         expected_state_action_values = reward_batch + GAMMA * next_state_values
 
         loss = self.criterion(state_action_values.to(torch.float), expected_state_action_values.to(torch.float))
+        # print(loss.item())
         # Optimize the model
         self.optimizer.zero_grad()
         loss.backward()
-
+        torch.nn.utils.clip_grad_value_(self.policy_model.parameters(), 50)
         self.optimizer.step()
 
-    def update_target_network(self):
-        # Update weights of a target Q-network here. You may use copy.deepcopy to do this or
-        # assign a values of network parameters via PyTorch methods.
-        self.target_model.load_state_dict(self.policy_model.state_dict())
+    def soft_update_target_network(self):
+        target_net_state_dict = self.target_model.state_dict()
+        policy_net_state_dict = self.policy_model.state_dict()
+        for key in policy_net_state_dict:
+            target_net_state_dict[key] = policy_net_state_dict[key] * \
+                self.tau + target_net_state_dict[key]*(1-self.tau)
+        self.target_model.load_state_dict(target_net_state_dict)
 
     def act(self, state, info):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
-        cur_state = preprocess_data(state, info).to(torch.float).to(self.device)
+        cur_state = torch.tensor(preprocess_data(state, info)).to(torch.float).to(self.device)
         self.policy_model.eval()
         with torch.no_grad():
             act = self.policy_model(cur_state).argmax(dim=-1).squeeze().cpu().numpy()
@@ -126,7 +130,7 @@ class DQN:
     
     def act_preprocessed(self, state):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
-        cur_state = state.to(torch.float).to(self.device)
+        cur_state = torch.tensor(state).to(torch.float).to(self.device)
         self.policy_model.eval()
         with torch.no_grad():
             act = self.policy_model(cur_state).argmax(dim=-1).squeeze().cpu().numpy()
@@ -138,20 +142,23 @@ class DQN:
         if self.steps % STEPS_PER_UPDATE == 0:
             batch = self.sample_batch()
             self.train_step(batch)
-        if self.steps % STEPS_PER_TARGET_UPDATE == 0:
-            self.update_target_network()
+        self.soft_update_target_network()
         self.steps += 1
 
     def save(self):
         torch.save(self.policy_model.state_dict(), "agent.pkl")
 
-def evaluate_policy(agent, env, episodes=5):
-    env = RenderedEnvWrapper(env)
+def evaluate_policy(agent, env, do_render=False, episodes=5):
+    if do_render:
+        env = RenderedEnvWrapper(env)
+    scores = []
     for i in range(episodes):
         done = False
         state, info = env.reset()
 
         while not done:
             state, done, info = env.step(agent.act(state, info))
-        env.render(f"./Episode_{i+1}")
-    return info["scores"][0]
+        if do_render:
+            env.render(f"./Episode_{i+1}")
+        scores.append(info["scores"][0])
+    return scores

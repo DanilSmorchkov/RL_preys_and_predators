@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from queue import Queue
-
+from numba import jit
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(ConvBlock, self).__init__()
@@ -68,26 +68,28 @@ class RLPreprocessor(nn.Module):
         image_features = self.ImagePreprocessor(image)
         return image_features.reshape(-1, 5, 256)
 
+@jit(nopython=True)
 def get_distance_mask(centered_obstacles_mask, source=(20, 20)):
-    queue = Queue()
-    queue.put(source)
+    queue = []
+    queue.append(source)
 
     distance_mask = np.empty_like(centered_obstacles_mask, dtype=np.float32)
     distance_mask.fill(np.nan)
     distance_mask[source[1], source[0]] = 0
 
-    while not queue.empty():
-        x, y = queue.get()
+    while queue:
+        x, y = queue.pop(0)
 
         for nx, ny in get_adjacent_cells(x, y, centered_obstacles_mask, distance_mask):
-            queue.put((nx, ny))
+            queue.append((nx, ny))
             distance_mask[ny, nx] = distance_mask[y, x] + 1
 
-    distance_mask[np.isnan(distance_mask)] = -1
+    distance_mask = np.nan_to_num(distance_mask, nan=-1)
     distance_mask = distance_mask / distance_mask.max()
-    distance_mask[distance_mask < 0] = 2
+    distance_mask = np.where(distance_mask<0, 2, distance_mask)
     return distance_mask
 
+@jit(nopython=True)
 def get_adjacent_cells(x, y, obstacles_mask, distance_mask):
     """Yields adjacent cells to (x, y) that are not obstacles and have not been visited"""
     n, m = obstacles_mask.shape
@@ -97,32 +99,32 @@ def get_adjacent_cells(x, y, obstacles_mask, distance_mask):
         if obstacles_mask[ny, nx] != 1 and np.isnan(distance_mask[ny, nx]):
             yield (nx, ny)
 
-def preprocess_data(state: np.ndarray, info: dict, count_distance = True) -> torch.Tensor:
-    state = torch.tensor(state)
+def preprocess_data(state: np.ndarray, info: dict, count_distance = True) -> np.ndarray:
+    state = np.array(state)
 
     hunters_coordinates = np.array([(agent["y"], agent["x"]) for agent in info["predators"]])
     prey_id = state[:,:, 0].max()
-    prey_mask = (state[:,:, 0] == prey_id).to(int)
-    hunter_mask = (state[:,:, 0] == 0).to(int)
-    wall_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == -1)).to(int)
+    prey_mask = (state[:,:, 0] == prey_id).astype(int)
+    hunter_mask = (state[:,:, 0] == 0).astype(int)
+    wall_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == -1)).astype(int)
     # bonuses_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == 1)).to(int)
     
     states = []
     for hunter_coordinates in hunters_coordinates:
         centred_coods = 20 - hunter_coordinates[0], 20 - hunter_coordinates[1]
-        obst_mask = torch.roll(wall_mask, centred_coods, dims=[0, 1])
-        hunter_state = torch.stack(
-            [
-                torch.roll(prey_mask, centred_coods, dims=[0, 1]),
-                torch.roll(hunter_mask, centred_coods, dims=[0, 1]),
+        obst_mask = np.roll(wall_mask, centred_coods, axis=(0, 1))
+        hunter_state = np.stack(
+            (
+                np.roll(prey_mask, centred_coods, axis=(0, 1)),
+                np.roll(hunter_mask, centred_coods, axis=(0, 1)),
                 obst_mask,
-                torch.tensor(get_distance_mask(obst_mask) if count_distance else torch.zeros_like(obst_mask)),
+                np.array(get_distance_mask(obst_mask)) if count_distance else np.zeros_like(obst_mask)
+                ),
                 
-            ]
-                )
-        states.append(hunter_state.float())
+        )
+        states.append(hunter_state.astype(float))
     
-    return torch.stack(states)
+    return np.stack(states)
 
 if __name__ == "__main__":
     preprocessor = ImagePreprocessor()
