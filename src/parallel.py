@@ -8,7 +8,8 @@ from world.map_loaders.single_team import SingleTeamLabyrinthMapLoader
 from src.options import TRANSITIONS
 from src.utils import calculate_reward
 from src.options import GAMMA, STEPS_PER_UPDATE
-from src.utils import record, preprocess_data
+from src.utils import record
+from src.preprocess import preprocess_data
 import numpy as np
 
 
@@ -32,6 +33,7 @@ class Worker(mp.Process):
         )
         self.global_network, self.opt = global_network, opt
         self.local_network = A3C().to(device)  # local network
+        self.local_network.load_state_dict(self.global_network.state_dict())
         self.local_env = OnePlayerEnv(Realm(SingleTeamLabyrinthMapLoader(), 1))
         self.device = device
 
@@ -40,14 +42,21 @@ class Worker(mp.Process):
         while self.global_episode.value < TRANSITIONS:
             state, info = self.local_env.reset()
             states_buffer, actions_buffer, rewards_buffer = [], [], []
+            total_reward = np.zeros(5)
             while True:
-                state = preprocess_data(state, info)
-                action = self.local_network.act(state.to(self.device))
+                processed_state = preprocess_data(state, info)
+                action = self.local_network.act(processed_state.to(self.device))
                 next_state, done, next_info = self.local_env.step(action)
 
-                reward = calculate_reward(next_state, info, next_info)
+                reward = calculate_reward(processed_state, 
+                                          preprocess_data(next_state, next_info, count_distance=False), 
+                                          info, 
+                                          next_info, 
+                                          action)
 
-                states_buffer.append(state)
+                total_reward+=reward
+
+                states_buffer.append(processed_state)
                 # info_buffer.append(additional_info)
                 actions_buffer.append(torch.tensor(action).unsqueeze(0))
                 rewards_buffer.append(reward)
@@ -68,6 +77,7 @@ class Worker(mp.Process):
                             self.global_episode,
                             self.global_episode_reward,
                             next_info["scores"][0],
+                            total_reward,
                             self.res_queue,
                             self.name,
                         )

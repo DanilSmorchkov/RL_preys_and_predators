@@ -1,14 +1,9 @@
-"""
-Functions that use multiple times
-"""
-
-from collections import defaultdict
-
 import torch
 import numpy as np
+from queue import Queue
 from world.utils import RenderedEnvWrapper
+from src.preprocess import preprocess_data, get_adjacent_cells
 
-my_hash = defaultdict(int)
 
 
 class SharedAdam(torch.optim.Adam):
@@ -27,46 +22,7 @@ class SharedAdam(torch.optim.Adam):
                 state['exp_avg'].share_memory_()
                 state['exp_avg_sq'].share_memory_()
 
-def calculate_reward(state, old_info, new_info) -> np.ndarray:
-    # eaten словарь из пойманных существ.
-    # Ключи - номер команды и индекс пойманного существа,
-    # значение - номер команды и индекс существа, которое его поймало
-    team_indices = [predator["id"] for predator in new_info["predators"]]
-    team_coordinates = np.array([(predator["y"], predator["x"]) for predator in new_info["predators"]])
-    old_team_coordinates = np.array([(predator["y"], predator["x"]) for predator in old_info["predators"]])
-
-    new_preys_coordinates = np.array([(prey["y"], prey["x"]) for prey_index, prey in enumerate(new_info["preys"]) if old_info["preys"][prey_index]["alive"]])
-    old_preys_coordinates = np.array([(prey["y"], prey["x"]) for prey in old_info["preys"] if prey["alive"]])
-
-    # eaten = np.array(list(new_info["eaten"].values()))
-    rewards = []
-
-    for hunter_index, hunter_position, old_hunter_position in zip(team_indices, team_coordinates, old_team_coordinates):
-        # distance_to_closest_prey = np.linalg.norm(hunter_position[None, :] - preys_coordinates, axis=1).min()
-        # todo: add eaten hunter handling
-        # if len(eaten):
-        #     eaten_by_current_hunter = eaten[(eaten == (0, hunter_index)).all(axis=1)].shape[0]
-        # else:
-        #     eaten_by_current_hunter = 0
-        # my_hash[tuple(hunter_position)] += 1
-        # rewards.append(
-        #     10 * eaten_by_current_hunter
-        #     + 5 / (distance_to_closest_prey + 1e-9)
-        #     + 3 * (my_hash[tuple(hunter_position)]) ** (-1 / 2)
-        # )
-        current_potential = get_potential(state, hunter_position, new_preys_coordinates)
-        previous_potential = get_potential(state, old_hunter_position, old_preys_coordinates)
-
-        rewards.append(0.99 * current_potential - previous_potential)
-    return np.array(rewards)
-
-def get_potential(state, hunter_position: np.ndarray, preys_coordinates: np.ndarray):
-    closest_pray_coords = preys_coordinates[np.argsort(np.sum(np.abs(preys_coordinates - hunter_position), axis=-1))]
-
-    distance = find_path(state, hunter_position, closest_pray_coords, 5)
-    return 1 - distance /(40 + 40 - 2)
-
-def record(global_ep, global_ep_r, episode_score, res_queue, name):
+def record(global_ep, global_ep_r, episode_score, my_reward, res_queue, name):
     with global_ep.get_lock():
         global_ep.value += 1
     with global_ep_r.get_lock():
@@ -76,10 +32,9 @@ def record(global_ep, global_ep_r, episode_score, res_queue, name):
         name,
         "Ep:",
         global_ep.value,
-        "| Ep_r: %.3f" % global_ep_r.value,
-        # "| Ep_score: %.0f" % episode_score,
+        "| Ep_r: %.2f" % global_ep_r.value,
+        "| Ep_score: %.2f" % my_reward.mean(),
     )
-
 
 def evaluate_policy(agent, env, device, episodes=5):
     env = RenderedEnvWrapper(env)
@@ -100,122 +55,112 @@ def evaluate_policy(agent, env, device, episodes=5):
         env.render(f"./Episode_{i+1}")
     return info["scores"][0]
 
-def preprocess_data(state: np.ndarray, info: dict) -> torch.Tensor:
-    state = torch.tensor(state)
-
-    hunters_coordinates = torch.tensor(np.array([(agent["y"], agent["x"]) for agent in info["predators"]]))
-    prey_id = state[:,:, 0].max()
-    prey_mask = (state[:,:, 0] == prey_id)
-    hunter_mask = (state[:,:, 0] == 0)
-    state[prey_mask] = prey_id * torch.ones_like(state[prey_mask])
-
-    states = []
-    for hunter_coordinates in hunters_coordinates:
-        new_state = state.clone()
-        new_state[hunter_mask] = 5 * torch.ones_like(new_state[hunter_mask])
-        new_state[[*hunter_coordinates]] = torch.ones_like(new_state[[*hunter_coordinates]]) * 15
-        states.append(new_state.permute(2,0,1).float().unsqueeze(0))
+def action_coord_change(position, action) -> tuple[int, int]:
+        y, x = position[0], position[1]
+        tx, ty = x, y
+        if action == 1:
+            tx = (x + 1) % 40
+        elif action == 2:
+            tx = (40 + x - 1) % 40
+        elif action == 3:
+            ty = (40 + y - 1) % 40
+        elif action == 4:
+            ty = (y + 1) % 40
+        return ty, tx
     
-    return torch.cat(states)
-
-from collections import deque
-
-# To store matrix cell coordinates
-class Point:
-    def __init__(self,x: int, y: int):
-        self.x = x
-        self.y = y
- 
-# A data structure for queue used in BFS
-class queueNode:
-    def __init__(self,pt: Point, dist: int):
-        self.pt = pt  # The coordinates of the cell
-        self.dist = dist  # Cell's distance from the source
- 
-# Check whether given cell(row,col)
-# is a valid cell or not
-def isValid(row: int, col: int, mask):
-    if row < 0:
-        row = 39
-    if col < 0:
-        col = 39
-    if row >= 40:
-        row = 0
-    if col >= 40:
-        col = 0
+def calculate_reward(processed_state, next_processed_state, old_info, new_info, actions) -> np.ndarray:
+    # eaten словарь из пойманных существ.
+    # Ключи - номер команды и индекс пойманного существа,
+    # значение - номер команды и индекс существа, которое его поймало
     
-    return mask[row, col], row, col
- 
-# These arrays are used to get row and column 
-# numbers of 4 neighbours of a given cell 
-rowNum = [-1, 0, 0, 1]
-colNum = [0, -1, 1, 0]
- 
-# Function to find the shortest path between 
-# a given source cell to a destination cell. 
-def BFS(mat, src: Point, dest: Point):
-     
-    # check source and destination cell 
-    # of the matrix have value 1 
-    if mat[src.x][src.y]!=1 or mat[dest.x][dest.y]!=1:
-        return -1
-     
-    visited = [[False for i in range(40)] 
-                       for j in range(40)]
-     
-    # Mark the source cell as visited 
-    visited[src.x][src.y] = True
-     
-    # Create a queue for BFS 
-    q = deque()
-     
-    # Distance of source cell is 0
-    s = queueNode(src,0)
-    q.append(s) #  Enqueue source cell
-     
-    # Do a BFS starting from source cell 
-    while q:
- 
-        curr = q.popleft() # Dequeue the front cell
-         
-        # If we have reached the destination cell, 
-        # we are done 
-        pt = curr.pt
-        if pt.x == dest.x and pt.y == dest.y:
-            return curr.dist
-         
-        # Otherwise enqueue its adjacent cells 
-        for i in range(4):
-            row = pt.x + rowNum[i]
-            col = pt.y + colNum[i]
-             
-            # if adjacent cell is valid, has path  
-            # and not visited yet, enqueue it.
-            valid, row, col = isValid(row,col, mat)
-            if (valid and not visited[row][col]):
-                visited[row][col] = True
-                Adjcell = queueNode(Point(row,col),
-                                    curr.dist+1)
-                q.append(Adjcell)
-     
-    # Return -1 if destination cannot be reached 
-    return -1
+    old_distances = np.array([__get_n_nearest_targets(obst_mask, centered_preys_msk) for centered_preys_msk, _, obst_mask, _ in processed_state])
+    new_distances = np.array([__get_n_nearest_targets(obst_mask, centered_preys_msk) for centered_preys_msk, _, obst_mask, _ in next_processed_state])
 
-def find_path(state, hunter_coods, preys_coords, top_nearest = 5):
-    preys_coords = preys_coords[:top_nearest]
-    state = state.squeeze()
+    isnan = np.logical_or(np.isnan(old_distances), np.isnan(new_distances))
+    old_distances[isnan] = 0
+    new_distances[isnan] = 0
 
-    mask = (~((state[:, :, 0] == -1) * (state[:, :, 1] == -1) 
-              + (state[:, :, 0] == 0))).astype(np.int32)
-    mask[hunter_coods[0], hunter_coods[1]] = 1
-    source = Point(*hunter_coods)
-    distance = np.inf
-    for nearest_prey_coords in preys_coords:
-        dest = Point(*nearest_prey_coords)
-        distance = min(distance, BFS(mask,source,dest))
-        if distance == 0:
-            break
-        if distance == -1:
-            distance = 40 + 40 - 2
-            break
-    return distance
+    dist_difference = new_distances - old_distances
+
+    kills = get_kills(old_info, new_info)
+    
+    dist_difference[kills == 1] = 0
+
+    sudden_change = np.logical_or(dist_difference > 2,
+                                      dist_difference < -2)
+    dist_difference[sudden_change] = 0
+
+    dist_difference = np.clip(dist_difference, -1, 1)
+
+    result = dist_difference * -0.5 + kills
+
+    stands_still = check_for_standing_still(old_info, new_info)
+    result[stands_still == 1] = -0.7
+    
+    return result
+
+# def get_potential(centered_obstacles_mask: np.ndarray, centered_preys_mask: np.ndarray):
+
+#     # targets = __get_n_nearest_targets(centered_obstacles_mask, centered_preys_mask)
+#     distance = __get_n_nearest_targets(centered_obstacles_mask, centered_preys_mask)
+#     if not distance:
+#         return None
+#     return 1 - distance[0][-1] /(40 + 40 - 2)
+
+def check_for_standing_still(info, next_info):
+    out = []
+    for predator_info, next_predator_info in zip(info['predators'], next_info['predators']):
+        out.append(
+            predator_info['x'] == next_predator_info['x'] and
+            predator_info['y'] == next_predator_info['y']
+        )
+    return np.array(out)
+
+def get_kills(info, next_info):
+    """Returns prey kills and enemy kills for each predator of team 0 during the step"""
+    n = len(next_info['predators'])
+    prey_team_id = next_info['preys'][0]['team']
+    prey_kills = np.zeros(n)
+    # enemy_kills = np.zeros(n)
+
+    for killed, killer in next_info['eaten'].items():
+        if killer[0] != 0:
+            continue
+
+        if killed[0] == prey_team_id:
+            prey_kills[killer[1]] = 1
+
+    return prey_kills
+
+def __get_n_nearest_targets(obstacles_mask, centered_preys_mask, src = (20, 20), n=1):
+    """Returns list of tuples (x, y, dst) of n nearest targets 
+    or more if n nearest targets are bonuses or enemies"""
+
+    out = []
+
+    queue = Queue()
+    queue.put(src)
+
+    distance_mask = np.empty_like(obstacles_mask, dtype=np.float32)
+    distance_mask.fill(np.nan)
+    distance_mask[src[1], src[0]] = 0
+
+    contains_preys = False
+
+    while not queue.empty():
+        x, y = queue.get()
+
+        for nx, ny in get_adjacent_cells(x, y, obstacles_mask, distance_mask):
+            queue.put((nx, ny))
+            distance_mask[ny, nx] = distance_mask[y, x] + 1
+
+            if centered_preys_mask[ny, nx] == 1:
+                contains_preys = True
+                out.append((nx, ny, distance_mask[ny, nx]))
+
+            if len(out) >= n and contains_preys:
+                break
+    if not out:
+        return np.nan
+    else:
+        return out[0][2]
