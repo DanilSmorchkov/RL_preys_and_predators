@@ -13,6 +13,7 @@ from src.options import (
     LEARNING_RATE,
     GAMMA,
     STEPS_PER_UPDATE,
+    STEPS_PER_TARGET_UPDATE,
 )
 
 from world.utils import RenderedEnvWrapper
@@ -60,7 +61,6 @@ class DQN:
         self.replay_buffer = ReplayMemory(INITIAL_STEPS)
         self.criterion = nn.MSELoss()
         self.optimizer = Adam(self.policy_model.parameters(), lr=LEARNING_RATE)
-        self.tau = 0.005
 
     def consume_transition(self, transition):
         # Add transition to a replay buffer.
@@ -108,16 +108,13 @@ class DQN:
         # Optimize the model
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_value_(self.policy_model.parameters(), 50)
+
         self.optimizer.step()
 
-    def soft_update_target_network(self):
-        target_net_state_dict = self.target_model.state_dict()
-        policy_net_state_dict = self.policy_model.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key] * \
-                self.tau + target_net_state_dict[key]*(1-self.tau)
-        self.target_model.load_state_dict(target_net_state_dict)
+    def update_target_network(self):
+        # Update weights of a target Q-network here. You may use copy.deepcopy to do this or
+        # assign a values of network parameters via PyTorch methods.
+        self.target_model.load_state_dict(self.policy_model.state_dict())
 
     def act(self, state, info):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
@@ -141,7 +138,8 @@ class DQN:
         if self.steps % STEPS_PER_UPDATE == 0:
             batch = self.sample_batch()
             self.train_step(batch)
-        self.soft_update_target_network()
+        if self.steps % STEPS_PER_TARGET_UPDATE == 0:
+            self.update_target_network()
         self.steps += 1
 
     def save(self):
