@@ -51,7 +51,7 @@ class ReplayMemory(object):
 
 
 class DQN:
-    def __init__(self, state_dim, action_dim):
+    def __init__(self, state_dim, action_dim, save_path = "./", load_path = None):
         self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.steps = 0  # Do not change
         self.target_model = DQNModel(state_dim, action_dim).to(self.device)
@@ -61,6 +61,11 @@ class DQN:
         self.criterion = nn.HuberLoss()
         self.optimizer = Adam(self.policy_model.parameters(), lr=LEARNING_RATE)
         self.tau = 0.005
+        self.save_path = save_path
+        self.distance_map = None
+        if load_path is not None:
+            self.load_path = load_path
+            self.load()
 
     def consume_transition(self, transition):
         # Add transition to a replay buffer.
@@ -144,9 +149,46 @@ class DQN:
             self.train_step(batch)
         self.soft_update_target_network()
         self.steps += 1
+    
+    def reset(self, initial_state, info):
+        mask = np.zeros(initial_state.shape[:2], np.bool_)
+        mask[np.logical_or(np.logical_and(initial_state[:, :, 0] == -1, initial_state[:, :, 1] >= 0),
+                           initial_state[:, :, 0] >= 0)] = True
+        mask = mask.reshape(-1)
+
+        coords_amount = initial_state.shape[0] * initial_state.shape[1]
+        self.distance_map = (coords_amount + 1) * np.ones((coords_amount, coords_amount))
+        np.fill_diagonal(self.distance_map, 0.)
+        self.distance_map[np.logical_not(mask)] = (coords_amount + 1)
+        self.distance_map[:, np.logical_not(mask)] = (coords_amount + 1)
+
+        indexes_helper = [
+            [
+                x * initial_state.shape[1] + (y + 1) % initial_state.shape[1],
+                x * initial_state.shape[1] + (initial_state.shape[1] + y - 1) % initial_state.shape[1],
+                ((initial_state.shape[0] + x - 1) % initial_state.shape[0]) * initial_state.shape[1] + y,
+                ((x + 1) % initial_state.shape[0]) * initial_state.shape[1] + y
+            ]
+            for x in range(initial_state.shape[0]) for y in range(initial_state.shape[1])
+        ]
+
+        updated = True
+        while updated:
+            old_distances = self.distance_map.copy()
+            for j in range(coords_amount):
+                if mask[j]:
+                    for i in indexes_helper[j]:
+                        if mask[i]:
+                            self.distance_map[j] = np.minimum(self.distance_map[j], self.distance_map[i] + 1)
+            updated = (old_distances != self.distance_map).sum() > 0
+        self.distance_map = np.where(self.distance_map==(coords_amount + 1), np.nan, self.distance_map)
 
     def save(self):
-        torch.save(self.policy_model.state_dict(), "agent.pkl")
+        torch.save(self.policy_model.state_dict(), self.save_path + "agent.pkl")
+    
+    def load(self):
+        self.policy_model.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))
+        self.target_model.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))
 
 def evaluate_policy(agent, env, do_render=False, episodes=5):
     if do_render:

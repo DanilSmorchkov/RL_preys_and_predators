@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from queue import Queue
 from numba import jit
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -39,15 +38,17 @@ class ImagePreprocessor(nn.Module):
             ConvBlock(in_channels=4, out_channels=8, kernel_size=3, stride=1, padding=1),
             ResConvBlock(8),
             ResConvBlock(8),
+            ResConvBlock(8),
             ConvBlock(in_channels=8, out_channels=16, kernel_size=3, stride=1, padding=1),
             ResConvBlock(16),
             ResConvBlock(16),
+            ResConvBlock(16),
             ConvBlock(in_channels=16, out_channels=4, kernel_size=3, stride=1, padding=1),
-            nn.MaxPool2d(2),
-            # ResConvBlock(64),
+            ResConvBlock(4),
+            ResConvBlock(4),
             nn.Flatten()
         )
-        self.linear = nn.Sequential(nn.Linear(20 * 20 * 4, 256))
+        self.linear = nn.Sequential(nn.Linear(40 * 40 * 4, 256))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)

@@ -16,10 +16,14 @@ MIN_REWARD = 70
 np.random.seed(1337)
 torch.manual_seed(1337)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-env = OnePlayerEnv(Realm(SingleTeamRocksMapLoader(), 1))
-dqn = DQN(state_dim=256, action_dim=5)
+env = OnePlayerEnv(Realm(SingleTeamLabyrinthMapLoader(), 1))
+dqn = DQN(state_dim=256, 
+          action_dim=5, 
+          save_path="/home/RL_course_Predators_and_Preys/best_rocks/", 
+          load_path="/home/RL_course_Predators_and_Preys/best_all/")
 eps = 0.1
 state, info = env.reset()
+dqn.reset(state, info)
 processed_state = preprocess_data(state, info)
 for _ in tqdm(range(INITIAL_STEPS)):
     action = np.random.randint(0, 5, size=(5,))
@@ -38,12 +42,14 @@ for _ in tqdm(range(INITIAL_STEPS)):
 
     if done:
         state, info = env.reset()
+        dqn.reset(state, info)
         processed_state = preprocess_data(state, info)
     else:
         processed_state = next_processed_state.copy()
         info = next_info.copy()
 
 state, info = env.reset()
+dqn.reset(state, info)
 processed_state = preprocess_data(state, info)
 
 for i in tqdm(range(TRANSITIONS)):
@@ -70,6 +76,7 @@ for i in tqdm(range(TRANSITIONS)):
 
     if done:
         state, info = env.reset()
+        dqn.reset(state, info)
         processed_state = preprocess_data(state, info)
     else:
         processed_state = next_processed_state.copy()
