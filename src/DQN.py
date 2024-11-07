@@ -197,6 +197,7 @@ def evaluate_policy(agent, env, do_render=False, episodes=5):
     for i in range(episodes):
         done = False
         state, info = env.reset()
+        agent.reset(state, info)
 
         while not done:
             state, done, info = env.step(agent.act(state, info))
