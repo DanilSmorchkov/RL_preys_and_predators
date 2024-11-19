@@ -1,12 +1,8 @@
 import numpy as np
 import torch
-from tqdm import tqdm
 
 from pathlib import Path
 from src.DQN import DQN, evaluate_policy
-from src.utils import calculate_reward
-from src.preprocess import preprocess_data
-from src.options import INITIAL_STEPS, TRANSITIONS
 
 from world.envs import OnePlayerEnv
 from world.map_loaders.single_team import SingleTeamLabyrinthMapLoader, SingleTeamRocksMapLoader
