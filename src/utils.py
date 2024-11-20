@@ -1,7 +1,7 @@
 import numpy as np
 from numba import jit
     
-def calculate_reward(processed_state, next_processed_state, old_info, new_info, distance_map) -> np.ndarray:
+def calculate_reward(old_info, new_info, distance_map) -> np.ndarray:
     # eaten словарь из пойманных существ.
     # Ключи - номер команды и индекс пойманного существа,
     # значение - номер команды и индекс существа, которое его поймало
@@ -17,12 +17,21 @@ def calculate_reward(processed_state, next_processed_state, old_info, new_info, 
     old_distances = get_targets_distance(old_hunter_coords, eatable_targets, distance_map)
     new_distances = get_targets_distance(new_hunter_coords, eatable_targets, distance_map)
 
-    density = get_targets_density(eatable_targets, distance_map, radius=10)
-    enemy_bonus_counts = np.array([enemy['bonus_count'] for enemy in old_info['enemy'] if enemy["alive"]])
+    values = np.ones(len(eatable_targets))
+    values[-len(enemy_coords):] = values[-len(enemy_coords):] * 3 # As hunter kill equals 3 points +-
 
-    density[-len(enemy_coords):] = density[-len(enemy_coords):] # * 3 * (1 / (enemy_bonus_counts + 1))
+    density = get_targets_density(eatable_targets, distance_map, values, radius=5)
+    
+    enemy_bonus_counts = np.array([enemy['bonus_count'] for enemy in old_info['enemy'] if enemy["alive"]])
+    agents_bonus_counts = get_bonus_counts(old_info)
+
+    # Because we can't kill instantly and need 1 + bonus turns to achieve
+    density[-len(enemy_coords):] = density[-len(enemy_coords):] * (1 / (enemy_bonus_counts + 1)) 
 
     metric = density[None, :] / (old_distances + 1) # [5, n_pray] and fixes div 0 error
+
+    # We should not eat enemy without a bonus
+    metric[:, -len(enemy_coords):] = metric[:, -len(enemy_coords):] * (agents_bonus_counts > 0)[:, None]
 
     best_pray_index = np.argmax(metric, axis=1)
 
@@ -47,7 +56,7 @@ def calculate_reward(processed_state, next_processed_state, old_info, new_info, 
 
     dist_difference = np.clip(dist_difference, -1, 1)
 
-    result = dist_difference * -0.5 + prey_kills + bonus_kills * 1.3 + enemy_kills * 3
+    result = dist_difference * -0.5 + prey_kills + bonus_kills * 1.3 + enemy_kills * 3 * (agents_bonus_counts > 0)
 
     stands_still = check_for_standing_still(old_info, new_info)
     result[stands_still == 1] = -0.7
@@ -104,11 +113,12 @@ def get_targets_distance(hunters_coordinates: np.ndarray,
 @jit(nopython=True, parallel=True)
 def get_targets_density(preys_coords: np.ndarray, 
                         distance_map: np.ndarray, 
+                        values: np.ndarray,
                         radius):
     density = []
     flat_indices = np.array([prey_coords[0]*40 + prey_coords[1] for prey_coords in preys_coords])
     for prey_coord in preys_coords:
         distances = distance_map[prey_coord[0]*40 + prey_coord[1]]
         distances = distances[flat_indices]
-        density.append(np.sum(distances < radius))
+        density.append(np.sum(values[distances < radius]))
     return np.array(density)

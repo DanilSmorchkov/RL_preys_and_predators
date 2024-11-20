@@ -13,11 +13,11 @@ from world.scripted_agents import Dummy, ClosestTargetAgent
 np.random.seed(1337)
 torch.manual_seed(1337)
 device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
-env = VersusBotEnv(Realm(TwoTeamRocksMapLoader(preys_num=10), 2, bots={1: ClosestTargetAgent()}))
+env = VersusBotEnv(Realm(TwoTeamRocksMapLoader(preys_num=10), 2, bots={1: Dummy()}))
 dqn = DQN(embedding_size=256, 
           num_input_channels=6, 
         #   save_path="/home/RL_course_Predators_and_Preys/best_bot_vs_normal/", 
-          load_path="/home/RL_course_Predators_and_Preys/best_bot_all/"
+          load_path="/home/RL_course_Predators_and_Preys/best_bot_vs_normal/"
           )
 
 rewards, enemy_rewards = evaluate_policy(dqn, env, episodes=1, do_render=True)

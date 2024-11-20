@@ -4,6 +4,9 @@ import torch.nn.functional as F
 import numpy as np
 from torchvision.transforms.functional import center_crop
 
+def get_bonus_counts(info):
+    return np.array([p['bonus_count'] for p in info['predators']])
+
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(ConvBlock, self).__init__()
@@ -82,10 +85,13 @@ class DQNModel(nn.Module):
     def __init__(self, num_input_channels, embedding_size):
         super().__init__()
         self.data_processor = RLPreprocessor(num_input_channels, embedding_size)
-        self.layer3 = nn.Linear(embedding_size, 5)
+        self.bonus_processor = nn.Linear(1, 32)
+        self.layer3 = nn.Linear(embedding_size + 32, 5)
 
-    def forward(self, img):
+    def forward(self, img, bonuses):
         x = F.relu(self.data_processor(img))
+        y = self.bonus_processor(bonuses)
+        x = torch.cat((x,y), dim=-1)
         return self.layer3(x)
 
 class Agent:
@@ -98,12 +104,12 @@ class Agent:
 
     def act(self, state, info):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
-        cur_state = torch.tensor(self.preprocess_data(state, info)).to(torch.float)
-
+        image, bonuses = self.preprocess_data(state, info)
+        cur_state = torch.tensor(image).to(torch.float)
+        bonuses = torch.tensor(bonuses)
         self.agent.eval()
-
         with torch.no_grad():
-            act = self.agent(cur_state).argmax(dim=-1).squeeze().cpu().numpy()
+            act = self.agent(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
         return act
     
     def reset(self, initial_state, info):
@@ -139,7 +145,7 @@ class Agent:
             updated = (old_distances != self.distance_map).sum() > 0
         self.distance_map = np.where(self.distance_map==(coords_amount + 1), np.nan, self.distance_map)
 
-    def preprocess_data(self, state: np.ndarray, info: dict) -> np.ndarray:
+    def preprocess_data(self, state: np.ndarray, info: dict) -> tuple[np.ndarray, np.ndarray]:
         state = np.array(state)
         num_teams = info['preys'][0]['team']
 
@@ -177,4 +183,6 @@ class Agent:
             )
             states.append(hunter_state.astype(np.float64))
         
-        return np.stack(states)
+        bonus_counts = get_bonus_counts(info)[None, :, None].astype(np.float32)
+
+        return np.stack(states), bonus_counts

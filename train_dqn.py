@@ -10,18 +10,18 @@ from world.envs import OnePlayerEnv, VersusBotEnv
 from world.map_loaders.single_team import SingleTeamLabyrinthMapLoader, SingleTeamRocksMapLoader
 from world.realm import Realm
 from world.map_loaders.two_teams import TwoTeamLabyrinthMapLoader, TwoTeamRocksMapLoader
-from world.scripted_agents import Dummy, ClosestTargetAgent
+from world.scripted_agents import Dummy, ClosestTargetAgent, BrokenClosestTargetAgent
 MIN_REWARD = 0
 
 np.random.seed(1337)
 torch.manual_seed(1337)
 device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
-env = VersusBotEnv(Realm(TwoTeamRocksMapLoader(), 2, bots={1: ClosestTargetAgent()}))
+env = VersusBotEnv(Realm(TwoTeamRocksMapLoader(), 2, bots={1: BrokenClosestTargetAgent()}))
 # env = OnePlayerEnv(Realm(SingleTeamRocksMapLoader(), 1))
 dqn = DQN(embedding_size=256, 
           num_input_channels=6, 
-          save_path="/home/RL_course_Predators_and_Preys/best_bot_vs_normal/", 
-          load_path="/home/RL_course_Predators_and_Preys/best_bot_start/"
+          save_path="/home/RL_course_Predators_and_Preys/best_bot_all/", 
+          load_path="/home/RL_course_Predators_and_Preys/best_bot_vs_normal/"
           )
 eps = 0.1
 state, info = env.reset()
@@ -31,16 +31,18 @@ for _ in tqdm(range(INITIAL_STEPS)):
     action = np.random.randint(0, 5, size=(5,))
     next_state, done, next_info = env.step(action)
     next_processed_state = dqn.preprocess_data(next_state, next_info)
-    reward = calculate_reward(processed_state, 
-                              next_processed_state, 
-                              info, 
+    reward = calculate_reward(info, 
                               next_info,
                               dqn.distance_map)
+    img, bonuses = processed_state
+    new_img, new_bonuses = next_processed_state
     dqn.consume_transition(
         (
-            processed_state,
+            img,
+            bonuses,
             action,
-            next_processed_state,
+            new_img,
+            new_bonuses,
             reward,
             done,
         )
@@ -51,7 +53,7 @@ for _ in tqdm(range(INITIAL_STEPS)):
         dqn.reset(state, info)
         processed_state = dqn.preprocess_data(state, info)
     else:
-        processed_state = next_processed_state.copy()
+        processed_state = next_processed_state
         info = next_info.copy()
 
 state, info = env.reset()
@@ -68,17 +70,18 @@ for i in tqdm(range(TRANSITIONS)):
     next_state, done, next_info = env.step(action)
     next_processed_state = dqn.preprocess_data(next_state, next_info)
 
-    reward = calculate_reward(processed_state, 
-                              next_processed_state, 
-                              info, 
+    reward = calculate_reward(info, 
                               next_info, 
                               dqn.distance_map)
-
+    img, bonuses = processed_state
+    new_img, new_bonuses = next_processed_state
     dqn.update(
         (
-            processed_state,
+            img,
+            bonuses,
             action,
-            next_processed_state,
+            new_img,
+            new_bonuses,
             reward,
             done,
         )
@@ -89,7 +92,7 @@ for i in tqdm(range(TRANSITIONS)):
         dqn.reset(state, info)
         processed_state = dqn.preprocess_data(state, info)
     else:
-        processed_state = next_processed_state.copy()
+        processed_state = next_processed_state
         info = next_info.copy()
 
     if (i + 1) % (TRANSITIONS // 100) == 0:

@@ -14,6 +14,7 @@ from src.options import (
     GAMMA,
     STEPS_PER_UPDATE,
 )
+from src.utils import get_bonus_counts
 
 from world.utils import RenderedEnvWrapper
 random.seed(1337)
@@ -22,15 +23,18 @@ class DQNModel(nn.Module):
     def __init__(self, num_input_channels, embedding_size):
         super().__init__()
         self.data_processor = RLPreprocessor(num_input_channels, embedding_size)
-        self.layer3 = nn.Linear(embedding_size, 5)
+        self.bonus_processor = nn.Linear(1, 32)
+        self.layer3 = nn.Linear(embedding_size + 32, 5)
 
-    def forward(self, img):
+    def forward(self, img, bonuses):
         x = F.relu(self.data_processor(img))
+        y = self.bonus_processor(bonuses)
+        x = torch.cat((x,y), dim=-1)
         return self.layer3(x)
 
 
 Transition = namedtuple(
-    typename="Transition", field_names=("state", "action", "next_state", "reward", "done")
+    typename="Transition", field_names=("img","bonuses", "action", "next_img", "next_bonuses", "reward", "done")
 )
 
 
@@ -85,27 +89,30 @@ class DQN:
     def train_step(self, batch):
         self.policy_model.train()
         # Use batch to update DQN's network.
-        state_batch = torch.tensor(np.concatenate(batch.state)).to(torch.float)
+        img_batch = torch.tensor(np.concatenate(batch.img)).to(torch.float)
+        bonuses_batch = torch.tensor(np.concatenate(batch.bonuses)).to(torch.float)
         action_batch = torch.tensor(np.array(batch.action), dtype=torch.int64).to(self.device)
 
         state_action_values = (
-            self.policy_model(state_batch.to(self.device))
+            self.policy_model(img_batch.to(self.device), bonuses_batch.to(self.device))
             .gather(dim=2, index=action_batch[..., None])
             .squeeze()
             .to(self.device)
         )
 
-        next_state_batch = torch.tensor(np.concatenate(batch.next_state))
+        next_img_batch = torch.tensor(np.concatenate(batch.next_img))
+        next_bonuses_batch = torch.tensor(np.concatenate(batch.next_bonuses))
         reward_batch = torch.tensor(np.array(batch.reward)).to(self.device)
         done_batch = torch.tensor(np.array(batch.done))
 
         non_final_mask = torch.tensor(tuple(map(lambda s: not s, done_batch)), device=self.device, dtype=torch.bool)
-        non_final_next_states = next_state_batch.reshape(-1, 5, self.num_input_channels, 40, 40)[~done_batch].reshape(-1, self.num_input_channels, 40, 40).to(torch.float).to(self.device)
+        non_final_next_img = next_img_batch.reshape(-1, 5, self.num_input_channels, 40, 40)[~done_batch].reshape(-1, self.num_input_channels, 40, 40).to(torch.float).to(self.device)
+        non_final_next_bonuses = next_bonuses_batch[~done_batch].to(torch.float).to(self.device)
 
         next_state_values = torch.zeros((BATCH_SIZE, 5), device=self.device)
         with torch.no_grad():
             next_state_values[non_final_mask] = (
-                self.target_model(non_final_next_states).max(2).values
+                self.target_model(non_final_next_img, non_final_next_bonuses).max(2).values
             )
         # Compute the expected Q values
         expected_state_action_values = reward_batch + GAMMA * next_state_values
@@ -128,18 +135,22 @@ class DQN:
 
     def act(self, state, info):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
-        cur_state = torch.tensor(self.preprocess_data(state, info)).to(torch.float).to(self.device)
+        image, bonuses = self.preprocess_data(state, info)
+        cur_state = torch.tensor(image).to(torch.float).to(self.device)
+        bonuses = torch.tensor(bonuses).to(self.device)
         self.policy_model.eval()
         with torch.no_grad():
-            act = self.policy_model(cur_state).argmax(dim=-1).squeeze().cpu().numpy()
+            act = self.policy_model(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
         return act
     
     def act_preprocessed(self, state):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
-        cur_state = torch.tensor(state).to(torch.float).to(self.device)
+        image, bonuses = state
+        cur_state = torch.tensor(image).to(torch.float).to(self.device)
+        bonuses = torch.tensor(bonuses).to(self.device)
         self.policy_model.eval()
         with torch.no_grad():
-            act = self.policy_model(cur_state).argmax(dim=-1).squeeze().cpu().numpy()
+            act = self.policy_model(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
         return act
 
     def update(self, transition):
@@ -184,7 +195,7 @@ class DQN:
             updated = (old_distances != self.distance_map).sum() > 0
         self.distance_map = np.where(self.distance_map==(coords_amount + 1), np.nan, self.distance_map)
 
-    def preprocess_data(self, state: np.ndarray, info: dict) -> np.ndarray:
+    def preprocess_data(self, state: np.ndarray, info: dict) -> tuple[np.ndarray, np.ndarray]:
         state = np.array(state)
         num_teams = info['preys'][0]['team']
 
@@ -222,7 +233,9 @@ class DQN:
             )
             states.append(hunter_state.astype(np.float64))
         
-        return np.stack(states)
+        bonus_counts = get_bonus_counts(info)[None, :, None].astype(np.float32)
+
+        return np.stack(states), bonus_counts
 
     def save(self):
         if self.save_path:
