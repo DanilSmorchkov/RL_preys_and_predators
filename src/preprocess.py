@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-import numpy as np
-from numba import jit
+from torchvision.transforms.functional import center_crop
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(ConvBlock, self).__init__()
@@ -31,11 +30,11 @@ class ResConvBlock(nn.Module):
 
 
 class ImagePreprocessor(nn.Module):
-    def __init__(self):
+    def __init__(self, num_input_channels, embedding_size):
         super(ImagePreprocessor, self).__init__()
         # 40 40 2
-        self.conv1 = nn.Sequential(
-            ConvBlock(in_channels=4, out_channels=8, kernel_size=3, stride=1, padding=1),
+        self.full_conv = nn.Sequential(
+            ConvBlock(in_channels=num_input_channels, out_channels=8, kernel_size=3, stride=1, padding=1),
             ResConvBlock(8),
             ResConvBlock(8),
             ResConvBlock(8),
@@ -43,23 +42,31 @@ class ImagePreprocessor(nn.Module):
             ResConvBlock(16),
             ResConvBlock(16),
             ResConvBlock(16),
-            ConvBlock(in_channels=16, out_channels=4, kernel_size=3, stride=1, padding=1),
-            ResConvBlock(4),
-            ResConvBlock(4),
-            nn.Flatten()
+            ConvBlock(in_channels=16, out_channels=num_input_channels, kernel_size=3, stride=1, padding=1),
+            ResConvBlock(num_input_channels),
+            ResConvBlock(num_input_channels),
+            nn.Flatten(),
+            nn.Linear(40 * 40 * num_input_channels, 256)
         )
-        self.linear = nn.Sequential(nn.Linear(40 * 40 * 4, 256))
+
+        self.size_10 = nn.Linear(10 * 10 * num_input_channels, 256)
+
+        self.size_5 = nn.Linear(5 * 5 * num_input_channels, 256)
+
+        self.linear_last = nn.Linear(256 * 3, embedding_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        x = self.linear(x)
-        return x
+        x_5 = self.size_5(center_crop(x, [5, 5]).flatten(start_dim=1))
+        x_10 = self.size_10(center_crop(x, [10, 10]).flatten(start_dim=1))
+        x_full = self.full_conv(x)
+        result = torch.cat((x_full, x_10, x_5), dim=-1)
+        return self.linear_last(result)
 
 
 class RLPreprocessor(nn.Module):
-    def __init__(self):
+    def __init__(self, num_input_channels, embedding_size):
         super(RLPreprocessor, self).__init__()
-        self.ImagePreprocessor = ImagePreprocessor()
+        self.ImagePreprocessor = ImagePreprocessor(num_input_channels, embedding_size)
         # self.linear = nn.Linear(256 + 2, 256)
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
@@ -67,69 +74,4 @@ class RLPreprocessor(nn.Module):
         # image_features.shape [N_batch, 256] -> [N_batch, 5, 256]
         # N_batch, n_agents, state_dim
         image_features = self.ImagePreprocessor(image)
-        return image_features.reshape(-1, 5, 256)
-
-@jit(nopython=True)
-def get_distance_mask(centered_obstacles_mask, source=(20, 20)):
-    queue = []
-    queue.append(source)
-
-    distance_mask = np.empty_like(centered_obstacles_mask, dtype=np.float32)
-    distance_mask.fill(np.nan)
-    distance_mask[source[1], source[0]] = 0
-
-    while queue:
-        x, y = queue.pop(0)
-
-        for nx, ny in get_adjacent_cells(x, y, centered_obstacles_mask, distance_mask):
-            queue.append((nx, ny))
-            distance_mask[ny, nx] = distance_mask[y, x] + 1
-
-    distance_mask = np.nan_to_num(distance_mask, nan=-1)
-    distance_mask = distance_mask / distance_mask.max()
-    distance_mask = np.where(distance_mask<0, 2, distance_mask)
-    return distance_mask
-
-@jit(nopython=True)
-def get_adjacent_cells(x, y, obstacles_mask, distance_mask):
-    """Yields adjacent cells to (x, y) that are not obstacles and have not been visited"""
-    n, m = obstacles_mask.shape
-    for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-        nx = (x + dx) % m if x + dx >= 0 else m - 1
-        ny = (y + dy) % n if y + dy >= 0 else n - 1
-        if obstacles_mask[ny, nx] != 1 and np.isnan(distance_mask[ny, nx]):
-            yield (nx, ny)
-
-def preprocess_data(state: np.ndarray, info: dict, count_distance = True) -> np.ndarray:
-    state = np.array(state)
-
-    hunters_coordinates = np.array([(agent["y"], agent["x"]) for agent in info["predators"]])
-    prey_id = state[:,:, 0].max()
-    prey_mask = (state[:,:, 0] == prey_id).astype(int)
-    hunter_mask = (state[:,:, 0] == 0).astype(int)
-    wall_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == -1)).astype(int)
-    # bonuses_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == 1)).to(int)
-    
-    states = []
-    for hunter_coordinates in hunters_coordinates:
-        centred_coods = 20 - hunter_coordinates[0], 20 - hunter_coordinates[1]
-        obst_mask = np.roll(wall_mask, centred_coods, axis=(0, 1))
-        hunter_state = np.stack(
-            (
-                np.roll(prey_mask, centred_coods, axis=(0, 1)),
-                np.roll(hunter_mask, centred_coods, axis=(0, 1)),
-                obst_mask,
-                np.array(get_distance_mask(obst_mask)) if count_distance else np.zeros_like(obst_mask)
-                ),
-                
-        )
-        states.append(hunter_state.astype(float))
-    
-    return np.stack(states)
-
-if __name__ == "__main__":
-    preprocessor = ImagePreprocessor()
-    x = torch.randn((1, 40, 40, 2))
-    with torch.no_grad():
-        result = preprocessor(x.permute(0, 3, 1, 2))
-    print(result.shape)
+        return image_features.reshape(-1, 5, image_features.shape[-1])

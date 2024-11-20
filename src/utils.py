@@ -1,14 +1,33 @@
 import numpy as np
-from src.preprocess import get_adjacent_cells
 from numba import jit
     
-def calculate_reward(processed_state, next_processed_state, old_info, new_info, actions) -> np.ndarray:
+def calculate_reward(processed_state, next_processed_state, old_info, new_info, distance_map) -> np.ndarray:
     # eaten словарь из пойманных существ.
     # Ключи - номер команды и индекс пойманного существа,
     # значение - номер команды и индекс существа, которое его поймало
     
-    old_distances = np.array([__get_n_nearest_targets(obst_mask, centered_preys_msk) for centered_preys_msk, _, obst_mask, _ in processed_state])
-    new_distances = np.array([__get_n_nearest_targets(obst_mask, centered_preys_msk) for centered_preys_msk, _, obst_mask, _ in next_processed_state])
+    old_hunter_coords = np.array([(agent["y"], agent["x"]) for agent in old_info["predators"]])
+    new_hunter_coords = np.array([(agent["y"], agent["x"]) for agent in new_info["predators"]])
+
+    enemy_coords = np.array([(enemy["y"], enemy["x"]) for enemy in old_info["enemy"] if enemy["alive"]])
+    pray_coords = np.array([(prey["y"], prey["x"]) for prey in old_info["preys"] if prey["alive"]])
+
+    eatable_targets = np.concatenate((pray_coords, enemy_coords))
+
+    old_distances = get_targets_distance(old_hunter_coords, eatable_targets, distance_map)
+    new_distances = get_targets_distance(new_hunter_coords, eatable_targets, distance_map)
+
+    density = get_targets_density(eatable_targets, distance_map, radius=10)
+    enemy_bonus_counts = np.array([enemy['bonus_count'] for enemy in old_info['enemy'] if enemy["alive"]])
+
+    density[-len(enemy_coords):] = density[-len(enemy_coords):] # * 3 * (1 / (enemy_bonus_counts + 1))
+
+    metric = density[None, :] / (old_distances + 1) # [5, n_pray] and fixes div 0 error
+
+    best_pray_index = np.argmax(metric, axis=1)
+
+    old_distances = np.take_along_axis(old_distances, best_pray_index[:, None], axis=1).squeeze()
+    new_distances = np.take_along_axis(new_distances, best_pray_index[:, None], axis=1).squeeze()
 
     isnan = np.logical_or(np.isnan(old_distances), np.isnan(new_distances))
     old_distances[isnan] = 0
@@ -16,9 +35,11 @@ def calculate_reward(processed_state, next_processed_state, old_info, new_info, 
 
     dist_difference = new_distances - old_distances
 
-    kills = get_kills(old_info, new_info)
+    prey_kills, enemy_kills, bonus_kills = get_kills(old_info, new_info)
     
-    dist_difference[kills == 1] = 0
+    killed_anybody = np.logical_or(prey_kills, enemy_kills, bonus_kills)
+
+    dist_difference[killed_anybody == 1] = 0
 
     sudden_change = np.logical_or(dist_difference > 2,
                                       dist_difference < -2)
@@ -26,20 +47,12 @@ def calculate_reward(processed_state, next_processed_state, old_info, new_info, 
 
     dist_difference = np.clip(dist_difference, -1, 1)
 
-    result = dist_difference * -0.5 + kills
+    result = dist_difference * -0.5 + prey_kills + bonus_kills * 1.3 + enemy_kills * 3
 
     stands_still = check_for_standing_still(old_info, new_info)
     result[stands_still == 1] = -0.7
     
     return result
-
-# def get_potential(centered_obstacles_mask: np.ndarray, centered_preys_mask: np.ndarray):
-
-#     # targets = __get_n_nearest_targets(centered_obstacles_mask, centered_preys_mask)
-#     distance = __get_n_nearest_targets(centered_obstacles_mask, centered_preys_mask)
-#     if not distance:
-#         return None
-#     return 1 - distance[0][-1] /(40 + 40 - 2)
 
 def check_for_standing_still(info, next_info):
     out = []
@@ -50,12 +63,15 @@ def check_for_standing_still(info, next_info):
         )
     return np.array(out)
 
+def get_bonus_counts(info):
+    return np.array([p['bonus_count'] for p in info['predators']])
+
 def get_kills(info, next_info):
     """Returns prey kills and enemy kills for each predator of team 0 during the step"""
     n = len(next_info['predators'])
     prey_team_id = next_info['preys'][0]['team']
     prey_kills = np.zeros(n)
-    # enemy_kills = np.zeros(n)
+    enemy_kills = np.zeros(n)
 
     for killed, killer in next_info['eaten'].items():
         if killer[0] != 0:
@@ -63,39 +79,36 @@ def get_kills(info, next_info):
 
         if killed[0] == prey_team_id:
             prey_kills[killer[1]] = 1
+        else:
+            enemy_kills[killer[1]] = 1
 
-    return prey_kills
+    bonus_counts = get_bonus_counts(info)
+    bonus_counts_next = get_bonus_counts(next_info)
+    bonus_kills = (bonus_counts_next > bonus_counts).astype(int)
+
+    return prey_kills, enemy_kills, bonus_kills
 
 @jit(nopython=True, parallel=True)
-def __get_n_nearest_targets(obstacles_mask, centered_preys_mask, src = (20, 20), n=1):
-    """Returns list of tuples (x, y, dst) of n nearest targets 
-    or more if n nearest targets are bonuses or enemies"""
-    
-    out = []
+def get_targets_distance(hunters_coordinates: np.ndarray, 
+                         preys_coords: np.ndarray, 
+                         distance_map: np.ndarray):
+    targets_distance = np.empty(shape=(5, len(preys_coords)), dtype=np.int64)
+    for i, hunter_coordinates in enumerate(hunters_coordinates):
+        distances = distance_map[hunter_coordinates[0]*40 + hunter_coordinates[1], :]
+        flat_indices = np.array([prey_coords[0]*40 + prey_coords[1] for prey_coords in preys_coords])
+        distances = distances[flat_indices]
+        targets_distance[i] = distances
 
-    queue = []
-    queue.append(src) 
+    return targets_distance
 
-    distance_mask = np.empty_like(obstacles_mask, dtype=np.float32)
-    distance_mask.fill(np.nan)
-    distance_mask[src[1], src[0]] = 0
-
-    contains_preys = False
-
-    while queue:
-        x, y = queue.pop(0)
-
-        for nx, ny in get_adjacent_cells(x, y, obstacles_mask, distance_mask):
-            queue.append((nx, ny))
-            distance_mask[ny, nx] = distance_mask[y, x] + 1
-
-            if centered_preys_mask[ny, nx] == 1:
-                contains_preys = True
-                out.append((nx, ny, distance_mask[ny, nx]))
-
-            if len(out) >= n and contains_preys:
-                break
-    if not out:
-        return np.nan
-    else:
-        return out[0][2]
+@jit(nopython=True, parallel=True)
+def get_targets_density(preys_coords: np.ndarray, 
+                        distance_map: np.ndarray, 
+                        radius):
+    density = []
+    flat_indices = np.array([prey_coords[0]*40 + prey_coords[1] for prey_coords in preys_coords])
+    for prey_coord in preys_coords:
+        distances = distance_map[prey_coord[0]*40 + prey_coord[1]]
+        distances = distances[flat_indices]
+        density.append(np.sum(distances < radius))
+    return np.array(density)

@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 import numpy as np
+from torchvision.transforms.functional import center_crop
 
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -31,11 +32,11 @@ class ResConvBlock(nn.Module):
         return x + y
 
 class ImagePreprocessor(nn.Module):
-    def __init__(self):
+    def __init__(self, num_input_channels, embedding_size):
         super(ImagePreprocessor, self).__init__()
         # 40 40 2
-        self.conv1 = nn.Sequential(
-            ConvBlock(in_channels=4, out_channels=8, kernel_size=3, stride=1, padding=1),
+        self.full_conv = nn.Sequential(
+            ConvBlock(in_channels=num_input_channels, out_channels=8, kernel_size=3, stride=1, padding=1),
             ResConvBlock(8),
             ResConvBlock(8),
             ResConvBlock(8),
@@ -43,23 +44,31 @@ class ImagePreprocessor(nn.Module):
             ResConvBlock(16),
             ResConvBlock(16),
             ResConvBlock(16),
-            ConvBlock(in_channels=16, out_channels=4, kernel_size=3, stride=1, padding=1),
-            ResConvBlock(4),
-            ResConvBlock(4),
-            nn.Flatten()
+            ConvBlock(in_channels=16, out_channels=num_input_channels, kernel_size=3, stride=1, padding=1),
+            ResConvBlock(num_input_channels),
+            ResConvBlock(num_input_channels),
+            nn.Flatten(),
+            nn.Linear(40 * 40 * num_input_channels, 256)
         )
-        self.linear = nn.Sequential(nn.Linear(40 * 40 * 4, 256))
+
+        self.size_10 = nn.Linear(10 * 10 * num_input_channels, 256)
+
+        self.size_5 = nn.Linear(5 * 5 * num_input_channels, 256)
+
+        self.linear_last = nn.Linear(256 * 3, embedding_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        x = self.linear(x)
-        return x
+        x_5 = self.size_5(center_crop(x, [5, 5]).flatten(start_dim=1))
+        x_10 = self.size_10(center_crop(x, [10, 10]).flatten(start_dim=1))
+        x_full = self.full_conv(x)
+        result = torch.cat((x_full, x_10, x_5), dim=-1)
+        return self.linear_last(result)
 
 
 class RLPreprocessor(nn.Module):
-    def __init__(self):
+    def __init__(self, num_input_channels, embedding_size):
         super(RLPreprocessor, self).__init__()
-        self.ImagePreprocessor = ImagePreprocessor()
+        self.ImagePreprocessor = ImagePreprocessor(num_input_channels, embedding_size)
         # self.linear = nn.Linear(256 + 2, 256)
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
@@ -67,13 +76,13 @@ class RLPreprocessor(nn.Module):
         # image_features.shape [N_batch, 256] -> [N_batch, 5, 256]
         # N_batch, n_agents, state_dim
         image_features = self.ImagePreprocessor(image)
-        return image_features.reshape(-1, 5, 256)
+        return image_features.reshape(-1, 5, image_features.shape[-1])
 
 class DQNModel(nn.Module):
-    def __init__(self, n_observations, n_actions):
+    def __init__(self, num_input_channels, embedding_size):
         super().__init__()
-        self.data_processor = RLPreprocessor()
-        self.layer3 = nn.Linear(256, n_actions)
+        self.data_processor = RLPreprocessor(num_input_channels, embedding_size)
+        self.layer3 = nn.Linear(embedding_size, 5)
 
     def forward(self, img):
         x = F.relu(self.data_processor(img))
@@ -81,7 +90,7 @@ class DQNModel(nn.Module):
 
 class Agent:
     def __init__(self) -> None:
-        self.agent = DQNModel(256, 5)
+        self.agent = DQNModel(6, 256)
         self.agent.load_state_dict(torch.load(__file__[:-8] + "/agent.pkl", map_location="cpu"))
         self.distance_map = None
     def get_actions(self, state, info):
@@ -132,19 +141,26 @@ class Agent:
 
     def preprocess_data(self, state: np.ndarray, info: dict) -> np.ndarray:
         state = np.array(state)
+        num_teams = info['preys'][0]['team']
 
         hunters_coordinates = np.array([(agent["y"], agent["x"]) for agent in info["predators"]])
         prey_id = state[:,:, 0].max()
         prey_mask = (state[:,:, 0] == prey_id).astype(np.int64)
         hunter_mask = (state[:,:, 0] == 0).astype(np.int64)
         wall_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == -1)).astype(np.int64)
-        # bonuses_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == 1)).to(int)
+        bonuses_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == 1)).astype(np.int64)
+        enemy_mask = ((state[:, :, 0] > 0) * (state[:, :, 0] < num_teams)).astype(np.int64)
+
+        for enemy in info["enemy"]:
+            enemy_mask[enemy["y"], enemy["x"]] *= (enemy["bonus_count"] + 1)
         
         states = []
         for hunter_coordinates in hunters_coordinates:
             centred_coods = 20 - hunter_coordinates[0], 20 - hunter_coordinates[1]
             obst_mask = np.roll(wall_mask, centred_coods, axis=(0, 1))
-            distance_mask = np.roll(self.distance_map[hunter_coordinates[0]*40 + hunter_coordinates[1]].reshape(40, 40), centred_coods, axis=(0, 1))
+            distance_mask = np.roll(self.distance_map[hunter_coordinates[0]*40 + hunter_coordinates[1]].reshape(40, 40), # type: ignore
+                                    centred_coods, 
+                                    axis=(0, 1))
             distance_mask = np.nan_to_num(distance_mask, nan=-1)
             distance_mask = distance_mask / distance_mask.max()
             distance_mask = np.where(distance_mask<0, 2, distance_mask)
@@ -153,7 +169,9 @@ class Agent:
                     np.roll(prey_mask, centred_coods, axis=(0, 1)),
                     np.roll(hunter_mask, centred_coods, axis=(0, 1)),
                     obst_mask,
-                    distance_mask
+                    distance_mask,
+                    np.roll(bonuses_mask, centred_coods, axis=(0, 1)),
+                    np.roll(enemy_mask, centred_coods, axis=(0, 1))
                     ),
                     
             )

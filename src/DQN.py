@@ -6,7 +6,7 @@ from torch.optim import Adam # type: ignore
 from collections import deque, namedtuple
 import random
 
-from src.preprocess import RLPreprocessor, preprocess_data
+from src.preprocess import RLPreprocessor
 from src.options import (
     BATCH_SIZE,
     INITIAL_STEPS,
@@ -19,10 +19,10 @@ from world.utils import RenderedEnvWrapper
 random.seed(1337)
 
 class DQNModel(nn.Module):
-    def __init__(self, n_observations, n_actions):
+    def __init__(self, num_input_channels, embedding_size):
         super().__init__()
-        self.data_processor = RLPreprocessor()
-        self.layer3 = nn.Linear(256, n_actions)
+        self.data_processor = RLPreprocessor(num_input_channels, embedding_size)
+        self.layer3 = nn.Linear(embedding_size, 5)
 
     def forward(self, img):
         x = F.relu(self.data_processor(img))
@@ -51,11 +51,12 @@ class ReplayMemory(object):
 
 
 class DQN:
-    def __init__(self, state_dim, action_dim, save_path = "./", load_path = None):
+    def __init__(self, num_input_channels, embedding_size, save_path = "./", load_path = None):
         self.device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        self.num_input_channels = num_input_channels
         self.steps = 0  # Do not change
-        self.target_model = DQNModel(state_dim, action_dim).to(self.device)
-        self.policy_model = DQNModel(state_dim, action_dim).to(self.device)
+        self.target_model = DQNModel(self.num_input_channels, embedding_size).to(self.device)
+        self.policy_model = DQNModel(self.num_input_channels, embedding_size).to(self.device)
         self.target_model.load_state_dict(self.policy_model.state_dict())
         self.replay_buffer = ReplayMemory(INITIAL_STEPS)
         self.criterion = nn.HuberLoss()
@@ -99,7 +100,7 @@ class DQN:
         done_batch = torch.tensor(np.array(batch.done))
 
         non_final_mask = torch.tensor(tuple(map(lambda s: not s, done_batch)), device=self.device, dtype=torch.bool)
-        non_final_next_states = next_state_batch.reshape(-1, 5, 4, 40, 40)[~done_batch].reshape(-1, 4, 40, 40).to(torch.float).to(self.device)
+        non_final_next_states = next_state_batch.reshape(-1, 5, self.num_input_channels, 40, 40)[~done_batch].reshape(-1, self.num_input_channels, 40, 40).to(torch.float).to(self.device)
 
         next_state_values = torch.zeros((BATCH_SIZE, 5), device=self.device)
         with torch.no_grad():
@@ -127,7 +128,7 @@ class DQN:
 
     def act(self, state, info):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
-        cur_state = torch.tensor(preprocess_data(state, info)).to(torch.float).to(self.device)
+        cur_state = torch.tensor(self.preprocess_data(state, info)).to(torch.float).to(self.device)
         self.policy_model.eval()
         with torch.no_grad():
             act = self.policy_model(cur_state).argmax(dim=-1).squeeze().cpu().numpy()
@@ -183,8 +184,49 @@ class DQN:
             updated = (old_distances != self.distance_map).sum() > 0
         self.distance_map = np.where(self.distance_map==(coords_amount + 1), np.nan, self.distance_map)
 
+    def preprocess_data(self, state: np.ndarray, info: dict) -> np.ndarray:
+        state = np.array(state)
+        num_teams = info['preys'][0]['team']
+
+        hunters_coordinates = np.array([(agent["y"], agent["x"]) for agent in info["predators"]])
+        prey_id = state[:,:, 0].max()
+        prey_mask = (state[:,:, 0] == prey_id).astype(np.int64)
+        hunter_mask = (state[:,:, 0] == 0).astype(np.int64)
+        wall_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == -1)).astype(np.int64)
+        bonuses_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == 1)).astype(np.int64)
+        enemy_mask = ((state[:, :, 0] > 0) * (state[:, :, 0] < num_teams)).astype(np.int64)
+
+        for enemy in info["enemy"]:
+            enemy_mask[enemy["y"], enemy["x"]] *= (enemy["bonus_count"] + 1)
+        
+        states = []
+        for hunter_coordinates in hunters_coordinates:
+            centred_coods = 20 - hunter_coordinates[0], 20 - hunter_coordinates[1]
+            obst_mask = np.roll(wall_mask, centred_coods, axis=(0, 1))
+            distance_mask = np.roll(self.distance_map[hunter_coordinates[0]*40 + hunter_coordinates[1]].reshape(40, 40), # type: ignore
+                                    centred_coods, 
+                                    axis=(0, 1))
+            distance_mask = np.nan_to_num(distance_mask, nan=-1)
+            distance_mask = distance_mask / distance_mask.max()
+            distance_mask = np.where(distance_mask<0, 2, distance_mask)
+            hunter_state = np.stack(
+                (
+                    np.roll(prey_mask, centred_coods, axis=(0, 1)),
+                    np.roll(hunter_mask, centred_coods, axis=(0, 1)),
+                    obst_mask,
+                    distance_mask,
+                    np.roll(bonuses_mask, centred_coods, axis=(0, 1)),
+                    np.roll(enemy_mask, centred_coods, axis=(0, 1))
+                    ),
+                    
+            )
+            states.append(hunter_state.astype(np.float64))
+        
+        return np.stack(states)
+
     def save(self):
-        torch.save(self.policy_model.state_dict(), self.save_path + "agent.pkl")
+        if self.save_path:
+            torch.save(self.policy_model.state_dict(), self.save_path + "agent.pkl")
     
     def load(self):
         self.policy_model.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))
@@ -194,6 +236,7 @@ def evaluate_policy(agent, env, do_render=False, episodes=5):
     if do_render:
         env = RenderedEnvWrapper(env)
     scores = []
+    enemy_scores = []
     for i in range(episodes):
         done = False
         state, info = env.reset()
@@ -204,4 +247,8 @@ def evaluate_policy(agent, env, do_render=False, episodes=5):
         if do_render:
             env.render(f"./Episode_{i+1}")
         scores.append(info["scores"][0])
-    return scores
+        if len(info["scores"]) > 1:
+            enemy_scores.append(info["scores"][1])
+        else:
+            enemy_scores.append(0)
+    return scores, enemy_scores
