@@ -4,8 +4,10 @@ import torch.nn.functional as F
 import numpy as np
 from torchvision.transforms.functional import center_crop
 
+
 def get_bonus_counts(info):
-    return np.array([p['bonus_count'] for p in info['predators']])
+    return np.array([p["bonus_count"] for p in info["predators"]])
+
 
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -34,6 +36,7 @@ class ResConvBlock(nn.Module):
         y = self.act(y)
         return x + y
 
+
 class ImagePreprocessor(nn.Module):
     def __init__(self, num_input_channels, embedding_size):
         super(ImagePreprocessor, self).__init__()
@@ -51,7 +54,7 @@ class ImagePreprocessor(nn.Module):
             ResConvBlock(num_input_channels),
             ResConvBlock(num_input_channels),
             nn.Flatten(),
-            nn.Linear(40 * 40 * num_input_channels, 256)
+            nn.Linear(40 * 40 * num_input_channels, 256),
         )
 
         self.size_10 = nn.Linear(10 * 10 * num_input_channels, 256)
@@ -81,6 +84,7 @@ class RLPreprocessor(nn.Module):
         image_features = self.ImagePreprocessor(image)
         return image_features.reshape(-1, 5, image_features.shape[-1])
 
+
 class DQNModel(nn.Module):
     def __init__(self, num_input_channels, embedding_size):
         super().__init__()
@@ -91,14 +95,16 @@ class DQNModel(nn.Module):
     def forward(self, img, bonuses):
         x = F.relu(self.data_processor(img))
         y = self.bonus_processor(bonuses)
-        x = torch.cat((x,y), dim=-1)
+        x = torch.cat((x, y), dim=-1)
         return self.layer3(x)
+
 
 class Agent:
     def __init__(self) -> None:
         self.agent = DQNModel(6, 256)
         self.agent.load_state_dict(torch.load(__file__[:-8] + "/agent.pkl", map_location="cpu"))
         self.distance_map = None
+
     def get_actions(self, state, info):
         return list(self.act(state, info))
 
@@ -111,27 +117,31 @@ class Agent:
         with torch.no_grad():
             act = self.agent(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
         return act
-    
+
     def reset(self, initial_state, info):
         mask = np.zeros(initial_state.shape[:2], np.bool_)
-        mask[np.logical_or(np.logical_and(initial_state[:, :, 0] == -1, initial_state[:, :, 1] >= 0),
-                           initial_state[:, :, 0] >= 0)] = True
+        mask[
+            np.logical_or(
+                np.logical_and(initial_state[:, :, 0] == -1, initial_state[:, :, 1] >= 0), initial_state[:, :, 0] >= 0
+            )
+        ] = True
         mask = mask.reshape(-1)
 
         coords_amount = initial_state.shape[0] * initial_state.shape[1]
         self.distance_map = (coords_amount + 1) * np.ones((coords_amount, coords_amount))
-        np.fill_diagonal(self.distance_map, 0.)
-        self.distance_map[np.logical_not(mask)] = (coords_amount + 1)
-        self.distance_map[:, np.logical_not(mask)] = (coords_amount + 1)
+        np.fill_diagonal(self.distance_map, 0.0)
+        self.distance_map[np.logical_not(mask)] = coords_amount + 1
+        self.distance_map[:, np.logical_not(mask)] = coords_amount + 1
 
         indexes_helper = [
             [
                 x * initial_state.shape[1] + (y + 1) % initial_state.shape[1],
                 x * initial_state.shape[1] + (initial_state.shape[1] + y - 1) % initial_state.shape[1],
                 ((initial_state.shape[0] + x - 1) % initial_state.shape[0]) * initial_state.shape[1] + y,
-                ((x + 1) % initial_state.shape[0]) * initial_state.shape[1] + y
+                ((x + 1) % initial_state.shape[0]) * initial_state.shape[1] + y,
             ]
-            for x in range(initial_state.shape[0]) for y in range(initial_state.shape[1])
+            for x in range(initial_state.shape[0])
+            for y in range(initial_state.shape[1])
         ]
 
         updated = True
@@ -143,33 +153,35 @@ class Agent:
                         if mask[i]:
                             self.distance_map[j] = np.minimum(self.distance_map[j], self.distance_map[i] + 1)
             updated = (old_distances != self.distance_map).sum() > 0
-        self.distance_map = np.where(self.distance_map==(coords_amount + 1), np.nan, self.distance_map)
+        self.distance_map = np.where(self.distance_map == (coords_amount + 1), np.nan, self.distance_map)
 
     def preprocess_data(self, state: np.ndarray, info: dict) -> tuple[np.ndarray, np.ndarray]:
         state = np.array(state)
-        num_teams = info['preys'][0]['team']
+        num_teams = info["preys"][0]["team"]
 
         hunters_coordinates = np.array([(agent["y"], agent["x"]) for agent in info["predators"]])
-        prey_id = state[:,:, 0].max()
-        prey_mask = (state[:,:, 0] == prey_id).astype(np.int64)
-        hunter_mask = (state[:,:, 0] == 0).astype(np.int64)
-        wall_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == -1)).astype(np.int64)
-        bonuses_mask = ((state[:,:, 0] == -1) * (state[:,:, 1] == 1)).astype(np.int64)
+        prey_id = state[:, :, 0].max()
+        prey_mask = (state[:, :, 0] == prey_id).astype(np.int64)
+        hunter_mask = (state[:, :, 0] == 0).astype(np.int64)
+        wall_mask = ((state[:, :, 0] == -1) * (state[:, :, 1] == -1)).astype(np.int64)
+        bonuses_mask = ((state[:, :, 0] == -1) * (state[:, :, 1] == 1)).astype(np.int64)
         enemy_mask = ((state[:, :, 0] > 0) * (state[:, :, 0] < num_teams)).astype(np.int64)
 
         for enemy in info["enemy"]:
-            enemy_mask[enemy["y"], enemy["x"]] *= (enemy["bonus_count"] + 1)
-        
+            enemy_mask[enemy["y"], enemy["x"]] *= enemy["bonus_count"] + 1
+
         states = []
         for hunter_coordinates in hunters_coordinates:
             centred_coods = 20 - hunter_coordinates[0], 20 - hunter_coordinates[1]
             obst_mask = np.roll(wall_mask, centred_coods, axis=(0, 1))
-            distance_mask = np.roll(self.distance_map[hunter_coordinates[0]*40 + hunter_coordinates[1]].reshape(40, 40), # type: ignore
-                                    centred_coods, 
-                                    axis=(0, 1))
+            distance_mask = np.roll(
+                self.distance_map[hunter_coordinates[0] * 40 + hunter_coordinates[1]].reshape(40, 40),  # type: ignore
+                centred_coods,
+                axis=(0, 1),
+            )
             distance_mask = np.nan_to_num(distance_mask, nan=-1)
             distance_mask = distance_mask / distance_mask.max()
-            distance_mask = np.where(distance_mask<0, 2, distance_mask)
+            distance_mask = np.where(distance_mask < 0, 2, distance_mask)
             hunter_state = np.stack(
                 (
                     np.roll(prey_mask, centred_coods, axis=(0, 1)),
@@ -177,12 +189,11 @@ class Agent:
                     obst_mask,
                     distance_mask,
                     np.roll(bonuses_mask, centred_coods, axis=(0, 1)),
-                    np.roll(enemy_mask, centred_coods, axis=(0, 1))
-                    ),
-                    
+                    np.roll(enemy_mask, centred_coods, axis=(0, 1)),
+                ),
             )
             states.append(hunter_state.astype(np.float64))
-        
+
         bonus_counts = get_bonus_counts(info)[None, :, None].astype(np.float32)
 
         return np.stack(states), bonus_counts

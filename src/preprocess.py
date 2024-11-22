@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from torchvision.transforms.functional import center_crop
+
+
 class ConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(ConvBlock, self).__init__()
@@ -46,7 +48,7 @@ class ImagePreprocessor(nn.Module):
             ResConvBlock(num_input_channels),
             ResConvBlock(num_input_channels),
             nn.Flatten(),
-            nn.Linear(40 * 40 * num_input_channels, 256)
+            nn.Linear(40 * 40 * num_input_channels, 256),
         )
 
         self.size_10 = nn.Linear(10 * 10 * num_input_channels, 256)
