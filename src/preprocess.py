@@ -51,15 +51,24 @@ class ImagePreprocessor(nn.Module):
             nn.Linear(40 * 40 * num_input_channels, 256),
         )
 
-        self.size_10 = nn.Linear(10 * 10 * num_input_channels, 256)
+        self.size_10_conv = nn.Sequential(
+            ResConvBlock(num_input_channels),
+            ResConvBlock(num_input_channels),
+            ResConvBlock(num_input_channels),
+        )
+        self.size_10_lin = nn.Linear(10 * 10 * num_input_channels, 256)
 
-        self.size_5 = nn.Linear(5 * 5 * num_input_channels, 256)
+        self.size_5_conv = nn.Sequential(
+            ResConvBlock(num_input_channels),
+            ResConvBlock(num_input_channels),
+        )
+        self.size_5_lin = nn.Linear(5 * 5 * num_input_channels, 256)
 
         self.linear_last = nn.Linear(256 * 3, embedding_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_5 = self.size_5(center_crop(x, [5, 5]).flatten(start_dim=1))
-        x_10 = self.size_10(center_crop(x, [10, 10]).flatten(start_dim=1))
+        x_5 = self.size_5_lin(self.size_5_conv(center_crop(x, [5, 5])).flatten(start_dim=1))
+        x_10 = self.size_10_lin(self.size_10_conv(center_crop(x, [10, 10])).flatten(start_dim=1))
         x_full = self.full_conv(x)
         result = torch.cat((x_full, x_10, x_5), dim=-1)
         return self.linear_last(result)

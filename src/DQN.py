@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import Adam  # type: ignore
-from utils import Transition, ReplayMemory
+from src.utils import Transition, ReplayMemory
 import random
 
 from src.preprocess import RLPreprocessor
@@ -38,15 +38,23 @@ class DQN:
         self.device = device
         self.num_input_channels = num_input_channels
         self.steps = 0  # Do not change
-        self.target_model = DQNModel(self.num_input_channels, embedding_size).to(self.device)
-        self.policy_model = DQNModel(self.num_input_channels, embedding_size).to(self.device)
-        self.target_model.load_state_dict(self.policy_model.state_dict())
+
+        self.target_model_1 = DQNModel(self.num_input_channels, embedding_size).to(self.device)
+        self.policy_model_1 = DQNModel(self.num_input_channels, embedding_size).to(self.device)
+        self.target_model_1.load_state_dict(self.policy_model_1.state_dict())
+
+        self.target_model_2 = DQNModel(self.num_input_channels, embedding_size).to(self.device)
+        self.policy_model_2 = DQNModel(self.num_input_channels, embedding_size).to(self.device)
+        self.target_model_2.load_state_dict(self.policy_model_2.state_dict())
+
         self.replay_buffer = ReplayMemory(INITIAL_STEPS)
         self.criterion = nn.HuberLoss()
-        self.optimizer = Adam(self.policy_model.parameters(), lr=LEARNING_RATE)
+        self.optimizer_1 = Adam(self.policy_model_1.parameters(), lr=LEARNING_RATE)
+        self.optimizer_2 = Adam(self.policy_model_2.parameters(), lr=LEARNING_RATE)
         self.tau = 0.005
         self.save_path = save_path
         self.distance_map = None
+        self.action_map = None
         if load_path is not None:
             self.load_path = load_path
             self.load()
@@ -66,14 +74,21 @@ class DQN:
         return batch
 
     def train_step(self, batch):
-        self.policy_model.train()
+        self.policy_model_1.train()
         # Use batch to update DQN's network.
         img_batch = torch.tensor(np.concatenate(batch.img)).to(torch.float)
         bonuses_batch = torch.tensor(np.concatenate(batch.bonuses)).to(torch.float)
         action_batch = torch.tensor(np.array(batch.action), dtype=torch.int64).to(self.device)
 
-        state_action_values = (
-            self.policy_model(img_batch.to(self.device), bonuses_batch.to(self.device))
+        state_action_values_1 = (
+            self.policy_model_1(img_batch.to(self.device), bonuses_batch.to(self.device))
+            .gather(dim=2, index=action_batch[..., None])
+            .squeeze()
+            .to(self.device)
+        )
+
+        state_action_values_2 = (
+            self.policy_model_2(img_batch.to(self.device), bonuses_batch.to(self.device))
             .gather(dim=2, index=action_batch[..., None])
             .squeeze()
             .to(self.device)
@@ -93,39 +108,59 @@ class DQN:
         )
         non_final_next_bonuses = next_bonuses_batch[~done_batch].to(torch.float).to(self.device)
 
-        next_state_values = torch.zeros((BATCH_SIZE, 5), device=self.device)
+        next_state_values_1 = torch.zeros((BATCH_SIZE, 5), device=self.device)
+        next_state_values_2 = torch.zeros((BATCH_SIZE, 5), device=self.device)
         with torch.no_grad():
-            next_state_values[non_final_mask] = (
-                self.target_model(non_final_next_img, non_final_next_bonuses).max(2).values
+            next_state_values_1[non_final_mask] = (
+                self.target_model_1(non_final_next_img, non_final_next_bonuses).max(2).values
             )
-        # Compute the expected Q values
-        expected_state_action_values = reward_batch + GAMMA * next_state_values
+            next_state_values_2[non_final_mask] = (
+                self.target_model_2(non_final_next_img, non_final_next_bonuses).max(2).values
+            )
+        
+        min_next_state_values = torch.minimum(next_state_values_1, next_state_values_2)
 
-        loss = self.criterion(state_action_values.to(torch.float), expected_state_action_values.to(torch.float))
+        # Compute the expected Q values
+        expected_state_action_values = reward_batch + GAMMA * min_next_state_values
+
+        loss_1 = self.criterion(state_action_values_1.to(torch.float), expected_state_action_values.to(torch.float))
+        loss_2 = self.criterion(state_action_values_2.to(torch.float), expected_state_action_values.to(torch.float))
         # print(loss.item())
         # Optimize the model
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_value_(self.policy_model.parameters(), 50)
-        self.optimizer.step()
+        self.optimizer_1.zero_grad()
+        self.optimizer_2.zero_grad()
+        loss_1.backward()
+        loss_2.backward()
+        torch.nn.utils.clip_grad_value_(self.policy_model_1.parameters(), 50)
+        torch.nn.utils.clip_grad_value_(self.policy_model_2.parameters(), 50)
+        self.optimizer_1.step()
+        self.optimizer_2.step()
 
     def soft_update_target_network(self):
-        target_net_state_dict = self.target_model.state_dict()
-        policy_net_state_dict = self.policy_model.state_dict()
-        for key in policy_net_state_dict:
-            target_net_state_dict[key] = policy_net_state_dict[key] * self.tau + target_net_state_dict[key] * (
+        target_net_state_dict_1 = self.target_model_1.state_dict()
+        policy_net_state_dict_1 = self.policy_model_1.state_dict()
+        target_net_state_dict_2 = self.target_model_2.state_dict()
+        policy_net_state_dict_2 = self.policy_model_2.state_dict()
+
+        for key_1, key_2 in zip(policy_net_state_dict_1, policy_net_state_dict_2):
+            target_net_state_dict_1[key_1] = policy_net_state_dict_1[key_1] * self.tau + target_net_state_dict_1[key_1] * (
                 1 - self.tau
             )
-        self.target_model.load_state_dict(target_net_state_dict)
+            target_net_state_dict_2[key_2] = policy_net_state_dict_2[key_2] * self.tau + target_net_state_dict_2[key_2] * (
+                1 - self.tau
+            )
+
+        self.target_model_1.load_state_dict(target_net_state_dict_1)
+        self.target_model_2.load_state_dict(target_net_state_dict_2)
 
     def act(self, state, info):
         # Compute an action. Do not forget to turn state to a Tensor and then turn an action to a numpy array.
         image, bonuses = self.preprocess_data(state, info)
         cur_state = torch.tensor(image).to(torch.float).to(self.device)
         bonuses = torch.tensor(bonuses).to(self.device)
-        self.policy_model.eval()
+        self.policy_model_1.eval()
         with torch.no_grad():
-            act = self.policy_model(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
+            act = self.policy_model_1(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
         return act
 
     def act_preprocessed(self, state):
@@ -133,9 +168,9 @@ class DQN:
         image, bonuses = state
         cur_state = torch.tensor(image).to(torch.float).to(self.device)
         bonuses = torch.tensor(bonuses).to(self.device)
-        self.policy_model.eval()
+        self.policy_model_1.eval()
         with torch.no_grad():
-            act = self.policy_model(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
+            act = self.policy_model_1(cur_state, bonuses).argmax(dim=-1).squeeze().cpu().numpy()
         return act
 
     def update(self, transition):
@@ -182,6 +217,12 @@ class DQN:
                         if mask[i]:
                             self.distance_map[j] = np.minimum(self.distance_map[j], self.distance_map[i] + 1)
             updated = (old_distances != self.distance_map).sum() > 0
+        
+        self.action_map = np.zeros((coords_amount, coords_amount), int)
+        for j in range(coords_amount):
+            self.action_map[j] = np.argmin(np.stack([self.distance_map[i] + 1 for i in indexes_helper[j]], axis=1),
+                                           axis=1) + 1
+
         self.distance_map = np.where(self.distance_map == (coords_amount + 1), np.nan, self.distance_map)
 
     def preprocess_data(self, state: np.ndarray, info: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -229,8 +270,8 @@ class DQN:
 
     def save(self):
         if self.save_path:
-            torch.save(self.policy_model.state_dict(), self.save_path + "agent.pkl")
+            torch.save(self.policy_model_1.state_dict(), self.save_path + "agent.pkl")
 
     def load(self):
-        self.policy_model.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))
-        self.target_model.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))
+        self.policy_model_1.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))
+        self.target_model_1.load_state_dict(torch.load(self.load_path + "agent.pkl", map_location=self.device))

@@ -58,8 +58,11 @@ class ClosestTargetAgent(ScriptedAgent):
 
     def reset(self, initial_state, team):
         mask = np.zeros(initial_state.shape[:2], np.bool_)
-        mask[np.logical_or(np.logical_and(initial_state[:, :, 0] == -1, initial_state[:, :, 1] >= 0),
-                           initial_state[:, :, 0] >= 0)] = True
+        mask[
+            np.logical_or(np.logical_and(initial_state[:, :, 0] == -1, initial_state[:, :, 1] >= 0),
+                           initial_state[:, :, 0] >= 0
+                           )
+        ] = True
         mask = mask.reshape(-1)
 
         coords_amount = initial_state.shape[0] * initial_state.shape[1]

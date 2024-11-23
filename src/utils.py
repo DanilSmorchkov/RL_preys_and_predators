@@ -3,10 +3,10 @@ import random
 from collections import namedtuple, deque
 from numba import jit
 
-from options import BATCH_SIZE
+from src.options import BATCH_SIZE
 from world.utils import RenderedEnvWrapper
 
-def calculate_reward(old_info, new_info, distance_map) -> np.ndarray:
+def calculate_reward(old_info, new_info, distance_map, old_state) -> np.ndarray:
     # eaten словарь из пойманных существ.
     # Ключи - номер команды и индекс пойманного существа,
     # значение - номер команды и индекс существа, которое его поймало
@@ -31,12 +31,12 @@ def calculate_reward(old_info, new_info, distance_map) -> np.ndarray:
     agents_bonus_counts = get_bonus_counts(old_info)
 
     # Because we can't kill instantly and need 1 + bonus turns to achieve
-    density[-len(enemy_coords) :] = density[-len(enemy_coords) :] * (1 / (enemy_bonus_counts + 1))
+    density[-len(enemy_coords):] = density[-len(enemy_coords):] * (1 / (enemy_bonus_counts + 1))
 
     metric = density[None, :] / (old_distances + 1)  # [5, n_pray] and fixes div 0 error
 
-    # We should not eat enemy without a bonus
-    metric[:, -len(enemy_coords) :] = metric[:, -len(enemy_coords) :] * (agents_bonus_counts > 0)[:, None]
+    # We should not eat enemy when we have no bonus
+    metric[:, -len(enemy_coords) :] = metric[:, -len(enemy_coords) :] * (agents_bonus_counts[:, None] > enemy_bonus_counts[None, :])
 
     best_pray_index = np.argmax(metric, axis=1)
 
@@ -59,14 +59,31 @@ def calculate_reward(old_info, new_info, distance_map) -> np.ndarray:
     dist_difference[sudden_change] = 0
 
     dist_difference = np.clip(dist_difference, -1, 1)
-
-    result = dist_difference * -0.5 + prey_kills + bonus_kills * 1.3 + enemy_kills * 3 * (agents_bonus_counts > 0)
+    
+    reward_for_bonus = get_bonus_reward(old_state, old_hunter_coords, new_hunter_coords, distance_map)
+    reward_for_bonus[(killed_anybody == 1) & (reward_for_bonus < 0)] = 0
+    
+    result = dist_difference * -0.5 + prey_kills * 2 + bonus_kills * 1.0 + enemy_kills * 1.5 * (agents_bonus_counts > 0) + 0.1 * reward_for_bonus
 
     stands_still = check_for_standing_still(old_info, new_info)
     result[stands_still == 1] = -0.7
 
     return result
 
+
+def get_bonus_reward(old_state, old_hunter_coords, new_hunter_coords, distance_map):
+    bonus_mask = ((old_state[:, :, 0] == -1) * (old_state[:, :, 1] == 1)).astype(np.int64)
+    y_bonus_coords, x_bonus_coords = np.nonzero(bonus_mask)
+    old_predators_distances = distance_map[old_hunter_coords[:, 0] * 40 + old_hunter_coords[:, 1]]
+    new_predators_distances = distance_map[new_hunter_coords[:, 0] * 40 + new_hunter_coords[:, 1]]
+    old_predators2bonuses_distances = np.take_along_axis(old_predators_distances, (y_bonus_coords * 40 + x_bonus_coords)[None, :], axis=1).squeeze()
+    old_predators2bonuses_distances = np.nan_to_num(old_predators2bonuses_distances, nan=float("inf"))
+    old_bonus_numbers = np.argmin(old_predators2bonuses_distances, axis=1)
+
+    new_predators2bonuses_distances = np.take_along_axis(new_predators_distances, (y_bonus_coords * 40 + x_bonus_coords)[None, :], axis=1).squeeze()
+
+    return np.min(old_predators2bonuses_distances, axis=1) - np.take_along_axis(new_predators2bonuses_distances, old_bonus_numbers[:, None], axis=1).squeeze()
+    
 
 def check_for_standing_still(info, next_info):
     out = []
@@ -115,11 +132,11 @@ def get_targets_distance(hunters_coordinates: np.ndarray, preys_coords: np.ndarr
 
 
 @jit(nopython=True, parallel=True)
-def get_targets_density(preys_coords: np.ndarray, distance_map: np.ndarray, values: np.ndarray, radius):
+def get_targets_density(eatable_targets_coords: np.ndarray, distance_map: np.ndarray, values: np.ndarray, radius):
     density = []
-    flat_indices = np.array([prey_coords[0] * 40 + prey_coords[1] for prey_coords in preys_coords])
-    for prey_coord in preys_coords:
-        distances = distance_map[prey_coord[0] * 40 + prey_coord[1]]
+    flat_indices = np.array([target_coords[0] * 40 + target_coords[1] for target_coords in eatable_targets_coords])
+    for target_coords in eatable_targets_coords:
+        distances = distance_map[target_coords[0] * 40 + target_coords[1]]
         distances = distances[flat_indices]
         density.append(np.sum(values[distances < radius]))
     return np.array(density)
@@ -165,3 +182,29 @@ def evaluate_policy(agent, env, do_render=False, episodes=5):
         else:
             enemy_scores.append(0)
     return scores, enemy_scores
+
+
+@jit(nopython=True, parallel=True)
+def get_greedy_actions(state, distance_map, action_map):
+    actions = np.zeros(5, dtype=np.int32)
+    predators = np.zeros((5, 2), dtype=np.int32)
+    preys = []
+    preys_team = 2
+    if preys_team == 0:
+        preys_team = None
+    for x in range(state.shape[0]):
+        for y in range(state.shape[1]):
+            if state[x, y, 0] == 0:
+                predators[state[x, y, 1]] = np.array([x, y])
+                continue
+            if (preys_team is None and state[x, y, 0] > 0) or (state[x, y, 0] == preys_team):
+                preys.append(np.array([x, y]))
+    if len(preys) > 0:
+        for k, (xs, ys) in enumerate(predators):
+            target = preys[0]
+            for p in preys:
+                if (distance_map[xs * state.shape[1] + ys, p[0] * state.shape[1] + p[1]] <
+                        distance_map[xs * state.shape[1] + ys, target[0] * state.shape[1] + target[1]]):
+                    target = p
+            actions[k] = action_map[xs * state.shape[1] + ys, target[0] * state.shape[1] + target[1]]
+    return actions
